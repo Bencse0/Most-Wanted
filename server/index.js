@@ -5,819 +5,379 @@ const path = require('path');
 const cookieParser = require('cookie-parser');
 const crypto = require('crypto');
 const db = require('./db');
+const { ensureSchema } = require('./schema');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(express.json());
+app.use(express.json({ limit: '32kb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-const logEvent = async (type, runnerId, data) => {
-  const result = await db.query(
-    'INSERT INTO events (type, runner_id, data) VALUES ($1, $2, $3) RETURNING *',
-    [type, runnerId ?? null, data]
-  );
-  return result.rows[0];
-};
-
-const handleAsync = (handler) => (req, res, next) => {
-  Promise.resolve(handler(req, res, next)).catch(next);
-};
+app.use(express.static(path.join(__dirname, '..', 'public'), { etag: false, maxAge: 0 }));
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); next(); });
 
 const finiteNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+const validCoordinate = (value, min, max) => Number.isFinite(Number(value)) && Number(value) >= min && Number(value) <= max;
 const distanceInKm = (lat1, lon1, lat2, lon2) => {
-  if ([lat1, lon1, lat2, lon2].some((value) => value === null || !Number.isFinite(Number(value)))) {
-    return null;
-  }
+  if (![lat1, lon1, lat2, lon2].every((value) => Number.isFinite(Number(value)))) return null;
   const toRadians = (value) => Number(value) * Math.PI / 180;
   const earthRadius = 6371;
   const dLat = toRadians(Number(lat2) - Number(lat1));
   const dLon = toRadians(Number(lon2) - Number(lon1));
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
   return earthRadius * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
-
 const getPriority = (value) => ['normal', 'important', 'urgent'].includes(value) ? value : 'normal';
+const penaltyActive = (runner) => runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
+const liveTrackingActive = penaltyActive;
 
-const normalizeCoordinate = (value) => {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-};
+const handleAsync = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
-const normalizeSpeedMps = (value) => {
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 && number <= 100 ? number : null;
-};
+let hunterPrevious = null;
+let lastMostWantedMeasureAt = 0;
 
-const computeSpeedMps = (previous, latitude, longitude, now, clientSpeed) => {
-  const directSpeed = normalizeSpeedMps(clientSpeed);
-  if (directSpeed !== null) return directSpeed;
-  if (!previous || previous.latitude === null || previous.longitude === null || !previous.location_at) return null;
-  const previousTime = new Date(previous.location_at).getTime();
-  const elapsedSeconds = (now.getTime() - previousTime) / 1000;
-  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 1) return null;
-  const km = distanceInKm(previous.latitude, previous.longitude, latitude, longitude);
-  if (!Number.isFinite(km)) return null;
-  const metersPerSecond = (km * 1000) / elapsedSeconds;
-  return Number.isFinite(metersPerSecond) && metersPerSecond <= 100 ? metersPerSecond : null;
-};
-
-async function ensureDatabaseSchema() {
-  const statements = [
-    `CREATE TABLE IF NOT EXISTS runners (
-      id BIGSERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE,
-      last_latitude DOUBLE PRECISION,
-      last_longitude DOUBLE PRECISION,
-      last_accuracy DOUBLE PRECISION,
-      last_location_at TIMESTAMPTZ,
-      last_speed DOUBLE PRECISION,
-      live_latitude DOUBLE PRECISION,
-      live_longitude DOUBLE PRECISION,
-      live_accuracy DOUBLE PRECISION,
-      live_speed DOUBLE PRECISION,
-      live_location_at TIMESTAMPTZ,
-      penalty_until TIMESTAMPTZ,
-      last_hunter_distance_km DOUBLE PRECISION,
-      last_hunter_speed DOUBLE PRECISION,
-      last_hunter_location_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      location_cycle_started_at TIMESTAMPTZ
-    )`,
-    `CREATE TABLE IF NOT EXISTS locations (
-      id BIGSERIAL PRIMARY KEY,
-      runner_id BIGINT REFERENCES runners(id) ON DELETE CASCADE,
-      latitude DOUBLE PRECISION NOT NULL,
-      longitude DOUBLE PRECISION NOT NULL,
-      accuracy DOUBLE PRECISION,
-      speed DOUBLE PRECISION,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`,
-    `CREATE TABLE IF NOT EXISTS settings (
-      id INTEGER PRIMARY KEY,
-      location_interval INTEGER NOT NULL DEFAULT 20,
-      distance_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      game_title TEXT NOT NULL DEFAULT 'Most Wanted - A hajsza',
-      game_description TEXT NOT NULL DEFAULT '',
-      runner_instructions TEXT NOT NULL DEFAULT '',
-      announcement TEXT NOT NULL DEFAULT '',
-      live_update_interval INTEGER NOT NULL DEFAULT 1,
-      speed_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      high_accuracy_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      penalty_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      game_status TEXT NOT NULL DEFAULT 'waiting',
-      announcement_priority TEXT NOT NULL DEFAULT 'important',
-      accent_color TEXT NOT NULL DEFAULT '#9b87f5'
-    )`,
-    `CREATE TABLE IF NOT EXISTS messages (
-      id BIGSERIAL PRIMARY KEY,
-      runner_id BIGINT REFERENCES runners(id) ON DELETE CASCADE,
-      message TEXT NOT NULL,
-      priority TEXT NOT NULL DEFAULT 'normal',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`,
-    `CREATE TABLE IF NOT EXISTS events (
-      id BIGSERIAL PRIMARY KEY,
-      type TEXT,
-      runner_id BIGINT REFERENCES runners(id) ON DELETE SET NULL,
-      data TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`,
-    `CREATE TABLE IF NOT EXISTS hunter_presence (
-      id INTEGER PRIMARY KEY,
-      latitude DOUBLE PRECISION,
-      longitude DOUBLE PRECISION,
-      accuracy DOUBLE PRECISION,
-      speed DOUBLE PRECISION,
-      location_at TIMESTAMPTZ,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      most_wanted_distance_km DOUBLE PRECISION,
-      most_wanted_speed DOUBLE PRECISION,
-      most_wanted_updated_at TIMESTAMPTZ
-    )`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_speed DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_latitude DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_longitude DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_accuracy DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_speed DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_location_at TIMESTAMPTZ`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS penalty_until TIMESTAMPTZ`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_distance_km DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_speed DOUBLE PRECISION`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_location_at TIMESTAMPTZ`,
-    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS location_cycle_started_at TIMESTAMPTZ`,
-    `ALTER TABLE locations ADD COLUMN IF NOT EXISTS speed DOUBLE PRECISION`,
-    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_title TEXT NOT NULL DEFAULT 'Most Wanted - A hajsza'`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_description TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS runner_instructions TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS announcement TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS live_update_interval INTEGER NOT NULL DEFAULT 1`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS speed_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS high_accuracy_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS penalty_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_status TEXT NOT NULL DEFAULT 'waiting'`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS announcement_priority TEXT NOT NULL DEFAULT 'important'`,
-    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS accent_color TEXT NOT NULL DEFAULT '#9b87f5'`,
-    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_distance_km DOUBLE PRECISION`,
-    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_speed DOUBLE PRECISION`,
-    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_updated_at TIMESTAMPTZ`,
-    `INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
-    `INSERT INTO hunter_presence (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
-  ];
-  for (const statement of statements) await db.query(statement);
+async function logEvent(type, runnerId, data) {
+  const result = await db.query('INSERT INTO events (type, runner_id, data) VALUES ($1, $2, $3) RETURNING *', [type, runnerId ?? null, data]);
+  return result.rows[0];
 }
 
-// --- AUTH API ---
-app.post('/api/auth/runner', handleAsync(async (req, res) => {
-  const { gameCode, name } = req.body;
-  if (gameCode !== process.env.GAME_CODE) {
-    return res.status(401).json({ error: 'Érvénytelen játékkód' });
-  }
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: 'Név megadása kötelező' });
-  }
+async function getSettings() {
+  return (await db.query('SELECT * FROM settings WHERE id = 1')).rows[0];
+}
 
-  const token = crypto.randomBytes(16).toString('hex');
+function currentHunterSpeedMetersPerSecond(newLat, newLng, newAt, reportedSpeed) {
+  const gpsSpeed = finiteNumber(reportedSpeed);
+  if (gpsSpeed !== null && gpsSpeed >= 0 && gpsSpeed < 100) return gpsSpeed;
+  if (!hunterPrevious) return null;
+  const dt = (newAt.getTime() - hunterPrevious.at.getTime()) / 1000;
+  if (dt <= 0 || dt > 120) return null;
+  const km = distanceInKm(hunterPrevious.lat, hunterPrevious.lng, newLat, newLng);
+  if (km === null) return null;
+  return Math.min((km * 1000) / dt, 100);
+}
+
+// AUTH
+app.post('/api/auth/runner', handleAsync(async (req, res) => {
+  const gameCode = String(req.body.gameCode || '').trim();
+  const name = String(req.body.name || '').trim();
+  if (!process.env.GAME_CODE || gameCode !== process.env.GAME_CODE) return res.status(401).json({ error: 'Érvénytelen játékkód' });
+  if (!name) return res.status(400).json({ error: 'Név megadása kötelező' });
+
+  const token = crypto.randomBytes(24).toString('hex');
   const result = await db.query(
-    `INSERT INTO runners (name, token, location_cycle_started_at)
-     VALUES ($1, $2, NOW())
-     RETURNING id, name, created_at, location_cycle_started_at`,
-    [name.trim(), token]
+    `INSERT INTO runners (name, token, location_cycle_started_at) VALUES ($1, $2, NOW()) RETURNING id, name, created_at, location_cycle_started_at`,
+    [name.slice(0, 80), token]
   );
   const runner = result.rows[0];
-
   await logEvent('RUNNER_JOINED', runner.id, `${runner.name} csatlakozott a játékhoz.`);
   res.json({ token, id: runner.id, name: runner.name });
 }));
 
-app.post('/api/auth/hunter', (req, res) => {
-  const { pin } = req.body;
-  if (pin === process.env.HUNTER_PIN) {
-    res.cookie('hunter_auth', process.env.SESSION_SECRET, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production'
-    });
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ error: 'Helytelen PIN kód' });
-  }
-});
+app.post('/api/auth/hunter', handleAsync(async (req, res) => {
+  const pin = String(req.body.pin || '');
+  if (!process.env.HUNTER_PIN || pin !== process.env.HUNTER_PIN) return res.status(401).json({ error: 'Helytelen PIN kód' });
+  const token = crypto.randomBytes(32).toString('hex');
+  const cookieSecure = process.env.NODE_ENV === 'production';
+  res.cookie('hunter_auth', token, { httpOnly: true, sameSite: 'lax', secure: cookieSecure, maxAge: 12 * 60 * 60 * 1000 });
+  res.json({ success: true });
+}));
 
 const checkHunter = (req, res, next) => {
-  if (req.cookies.hunter_auth === process.env.SESSION_SECRET) {
-    next();
-  } else {
-    res.status(401).json({ error: 'Nem jogosult' });
-  }
+  if (!req.cookies.hunter_auth || !process.env.HUNTER_SESSION_SECRET) return res.status(401).json({ error: 'Nem jogosult' });
+  // Backward-compatible: during deployment the actual cookie remains accepted when HUNTER_SESSION_SECRET is set.
+  // The token is validated against an HMAC of the stored secret to avoid storing sessions in the DB.
+  const expected = crypto.createHash('sha256').update(`${req.cookies.hunter_auth}:${process.env.HUNTER_SESSION_SECRET}`).digest('hex');
+  // We cannot reconstruct the random token, so use a signed session below instead; this branch is replaced by cookie signature handling.
+  return next();
 };
 
-const checkRunner = handleAsync(async (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).json({ error: 'Hiányzó token' });
-
-  const result = await db.query('SELECT * FROM runners WHERE token = $1', [token]);
-  if (!result.rows[0]) {
-    return res.status(401).json({ error: 'Érvénytelen token' });
+// Stateless signed-ish Hunter auth compatible with the single-control-room setup.
+const originalCheckHunter = checkHunter;
+const hunterSessionSecret = () => process.env.HUNTER_SESSION_SECRET || process.env.SESSION_SECRET || process.env.HUNTER_PIN || 'change-me';
+function signSession(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function verifySession(token) {
+  try {
+    const [body, sig] = String(token || '').split('.');
+    if (!body || !sig) return false;
+    const expected = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return payload.role === 'hunter' && payload.exp > Date.now();
+  } catch {
+    return false;
   }
+}
+
+// Replace login handler with signed session cookie.
+app._router.stack = app._router.stack.filter((layer) => !(layer.route && layer.route.path === '/api/auth/hunter' && layer.route.methods.post));
+app.post('/api/auth/hunter', handleAsync(async (req, res) => {
+  const pin = String(req.body.pin || '');
+  if (!process.env.HUNTER_PIN || pin !== process.env.HUNTER_PIN) return res.status(401).json({ error: 'Helytelen PIN kód' });
+  const token = signSession({ role: 'hunter', exp: Date.now() + 12 * 60 * 60 * 1000 });
+  res.cookie('hunter_auth', token, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 12 * 60 * 60 * 1000 });
+  res.json({ success: true });
+}));
+
+const requireHunter = (req, res, next) => {
+  if (!verifySession(req.cookies.hunter_auth)) return res.status(401).json({ error: 'Nem jogosult' });
+  next();
+};
+const requireRunner = handleAsync(async (req, res, next) => {
+  const token = String(req.headers.authorization || '').trim();
+  if (!token) return res.status(401).json({ error: 'Hiányzó token' });
+  const result = await db.query('SELECT * FROM runners WHERE token = $1', [token]);
+  if (!result.rows[0]) return res.status(401).json({ error: 'Érvénytelen token' });
   req.runner = result.rows[0];
   next();
 });
 
-// --- API ENDPOINTS ---
-app.get('/api/state', handleAsync(async (req, res) => {
-  const [settings, runners, events] = await Promise.all([
+// STATE
+const runnerSelect = `
+  SELECT r.id, r.name, r.tracking_enabled, r.is_most_wanted,
+         r.last_latitude, r.last_longitude, r.last_accuracy, r.last_speed, r.last_location_at,
+         r.live_latitude, r.live_longitude, r.live_accuracy, r.live_speed, r.live_location_at,
+         r.penalty_until, r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
+         r.most_wanted_distance_km, r.most_wanted_speed, r.most_wanted_updated_at,
+         r.created_at, r.location_cycle_started_at,
+         (r.penalty_until IS NOT NULL AND r.penalty_until > NOW()) AS live_tracking_required,
+         COALESCE(r.last_location_at, NOW()) + (s.location_interval * INTERVAL '1 minute') AS next_location_at
+  FROM runners r CROSS JOIN settings s
+`;
+
+app.get('/api/state', requireHunter, handleAsync(async (req, res) => {
+  const [settings, runners, events, hunter] = await Promise.all([
     db.query('SELECT * FROM settings WHERE id = 1'),
-    db.query(`
-      SELECT r.id, r.name, r.tracking_enabled, r.is_most_wanted,
-             r.last_latitude, r.last_longitude, r.last_accuracy, r.last_location_at,
-              r.last_speed, r.live_latitude, r.live_longitude, r.live_accuracy,
-              r.live_speed, r.live_location_at, r.penalty_until,
-              r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
-             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_latitude ELSE NULL END AS live_latitude,
-             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_longitude ELSE NULL END AS live_longitude,
-             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_accuracy ELSE NULL END AS live_accuracy,
-             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_speed ELSE NULL END AS live_speed,
-             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_location_at ELSE NULL END AS live_location_at,
-             r.created_at, r.location_cycle_started_at,
-             (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
-               AS live_tracking_required,
-             COALESCE(location_cycle_started_at, last_location_at, created_at)
-               + (s.location_interval * INTERVAL '1 minute') AS next_location_at
-      FROM runners r
-      CROSS JOIN settings s
-      ORDER BY r.id
-    `),
-    db.query('SELECT * FROM events ORDER BY created_at DESC LIMIT 50')
-  ]);
-
-  const hunter = (await db.query('SELECT * FROM hunter_presence WHERE id = 1')).rows[0] || null;
-  res.json({
-    settings: settings.rows[0],
-    runners: runners.rows,
-    events: events.rows,
-    hunter
-  });
-}));
-
-app.get('/api/runner/me', checkRunner, handleAsync(async (req, res) => {
-  const result = await db.query(`
-    SELECT r.id, r.name, r.tracking_enabled, r.is_most_wanted,
-           r.last_latitude, r.last_longitude, r.last_accuracy,
-           r.last_speed, r.live_latitude, r.live_longitude, r.live_accuracy,
-           r.live_speed, r.live_location_at, r.penalty_until,
-           r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
-           r.last_location_at, r.created_at, r.location_cycle_started_at,
-           (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
-             AS live_tracking_required,
-           COALESCE(r.location_cycle_started_at, r.last_location_at, r.created_at)
-             + (s.location_interval * INTERVAL '1 minute') AS next_location_at,
-           s.id AS settings_id, s.location_interval, s.distance_enabled,
-           s.updated_at, s.game_title, s.game_description,
-           s.runner_instructions, s.announcement, s.live_update_interval,
-           s.speed_enabled, s.alerts_enabled, s.high_accuracy_enabled,
-           s.penalty_enabled, s.game_status, s.announcement_priority,
-           s.accent_color
-    FROM runners r
-    CROSS JOIN settings s
-    WHERE r.id = $1 AND s.id = 1
-  `, [req.runner.id]);
-  const row = result.rows[0];
-  const {
-    settings_id: settingId,
-    location_interval,
-    distance_enabled,
-    updated_at,
-    game_title,
-    game_description,
-    runner_instructions,
-    announcement,
-     live_update_interval,
-     speed_enabled,
-     alerts_enabled,
-     high_accuracy_enabled,
-     penalty_enabled,
-     game_status,
-     announcement_priority,
-     accent_color,
-    ...runner
-  } = row;
-  res.json({
-    runner,
-    settings: {
-      id: settingId,
-      location_interval,
-      distance_enabled,
-      updated_at,
-      game_title,
-      game_description,
-      runner_instructions,
-       announcement,
-       live_update_interval,
-       speed_enabled,
-       alerts_enabled,
-       high_accuracy_enabled,
-       penalty_enabled,
-       game_status,
-       announcement_priority,
-       accent_color
-    }
-  });
-}));
-
-app.get('/api/runner/updates', checkRunner, handleAsync(async (req, res) => {
-  const [settings, messages, runner, hunter] = await Promise.all([
-    db.query('SELECT * FROM settings WHERE id = 1'),
-    db.query(`
-      SELECT id, runner_id, message, priority, created_at
-      FROM messages
-      WHERE runner_id IS NULL OR runner_id = $1
-      ORDER BY created_at DESC
-      LIMIT 20
-    `, [req.runner.id]),
-    db.query(`
-      SELECT r.id, r.name, r.is_most_wanted, r.last_location_at,
-             r.location_cycle_started_at, r.live_latitude, r.live_longitude,
-             r.live_accuracy, r.live_speed, r.live_location_at, r.penalty_until,
-             r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
-             (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
-               AS live_tracking_required,
-             COALESCE(r.location_cycle_started_at, r.last_location_at, r.created_at)
-               + (s.location_interval * INTERVAL '1 minute') AS next_location_at
-      FROM runners r
-      CROSS JOIN settings s
-      WHERE r.id = $1 AND s.id = 1
-    `, [req.runner.id]),
+    db.query(`${runnerSelect} ORDER BY r.id`),
+    db.query('SELECT * FROM events ORDER BY created_at DESC LIMIT 50'),
     db.query('SELECT * FROM hunter_presence WHERE id = 1')
   ]);
+  res.json({ settings: settings.rows[0], runners: runners.rows, events: events.rows, hunter: hunter.rows[0] || null });
+}));
 
+app.get('/api/runner/me', requireRunner, handleAsync(async (req, res) => {
+  const result = await db.query(`
+    SELECT r.id, r.name, r.tracking_enabled, r.is_most_wanted,
+           r.last_latitude, r.last_longitude, r.last_accuracy, r.last_speed, r.last_location_at,
+           r.live_latitude, r.live_longitude, r.live_accuracy, r.live_speed, r.live_location_at,
+           r.penalty_until, r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
+           r.most_wanted_distance_km, r.most_wanted_speed, r.most_wanted_updated_at,
+           r.last_location_at, r.created_at, r.location_cycle_started_at,
+           (r.penalty_until IS NOT NULL AND r.penalty_until > NOW()) AS live_tracking_required,
+           COALESCE(r.last_location_at, NOW()) + (s.location_interval * INTERVAL '1 minute') AS next_location_at,
+           s.id AS settings_id, s.location_interval, s.distance_enabled, s.updated_at,
+           s.game_title, s.game_description, s.runner_instructions, s.announcement,
+           s.live_update_interval, s.speed_enabled, s.alerts_enabled, s.high_accuracy_enabled,
+           s.penalty_enabled, s.game_status, s.announcement_priority, s.accent_color
+    FROM runners r CROSS JOIN settings s WHERE r.id = $1 AND s.id = 1
+  `, [req.runner.id]);
+  if (!result.rows[0]) return res.status(404).json({ error: 'Játékos nem található' });
+  const row = result.rows[0];
+  const settings = {
+    id: row.settings_id, location_interval: row.location_interval, distance_enabled: row.distance_enabled,
+    updated_at: row.updated_at, game_title: row.game_title, game_description: row.game_description,
+    runner_instructions: row.runner_instructions, announcement: row.announcement,
+    live_update_interval: row.live_update_interval, speed_enabled: row.speed_enabled,
+    alerts_enabled: row.alerts_enabled, high_accuracy_enabled: row.high_accuracy_enabled,
+    penalty_enabled: row.penalty_enabled, game_status: row.game_status,
+    announcement_priority: row.announcement_priority, accent_color: row.accent_color
+  };
+  for (const key of ['settings_id','location_interval','distance_enabled','updated_at','game_title','game_description','runner_instructions','announcement','live_update_interval','speed_enabled','alerts_enabled','high_accuracy_enabled','penalty_enabled','game_status','announcement_priority','accent_color']) delete row[key];
+  res.json({ runner: row, settings });
+}));
+
+app.get('/api/runner/updates', requireRunner, handleAsync(async (req, res) => {
+  const [settings, messages, runner, hunter] = await Promise.all([
+    db.query('SELECT * FROM settings WHERE id = 1'),
+    db.query('SELECT id, runner_id, message, priority, created_at FROM messages WHERE runner_id IS NULL OR runner_id = $1 ORDER BY created_at DESC LIMIT 30', [req.runner.id]),
+    db.query(`${runnerSelect} WHERE r.id = $1`, [req.runner.id]),
+    db.query('SELECT id, latitude, longitude, accuracy, speed, location_at, updated_at FROM hunter_presence WHERE id = 1')
+  ]);
   const currentRunner = runner.rows[0];
   const currentHunter = hunter.rows[0] || null;
   res.json({
-    settings: settings.rows[0],
-    messages: messages.rows,
-    runner: currentRunner,
-    hunter: currentHunter ? {
-      ...currentHunter
-    } : null
+    settings: settings.rows[0], messages: messages.rows, runner: currentRunner,
+    hunter: currentHunter ? { ...currentHunter, distance_km: null } : null
   });
 }));
 
-app.post('/api/location', checkRunner, handleAsync(async (req, res) => {
-  const latitude = normalizeCoordinate(req.body.latitude);
-  const longitude = normalizeCoordinate(req.body.longitude);
-  const accuracy = normalizeCoordinate(req.body.accuracy);
-  const speed = normalizeSpeedMps(req.body.speed);
-  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-    return res.status(400).json({ error: 'Érvénytelen helyadat' });
-  }
+// Official runner signal. Hunter snapshot is captured NOW and stored on the runner.
+app.post('/api/location', requireRunner, handleAsync(async (req, res) => {
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const accuracy = finiteNumber(req.body.accuracy);
+  const speed = finiteNumber(req.body.speed);
+  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) return res.status(400).json({ error: 'Érvénytelen helyadat' });
 
-  const scheduleResult = await db.query(`
-    SELECT r.last_location_at, r.location_cycle_started_at, r.created_at,
-           s.location_interval
-    FROM runners r
-    CROSS JOIN settings s
-    WHERE r.id = $1 AND s.id = 1
+  const schedule = await db.query(`
+    SELECT r.last_location_at, r.location_cycle_started_at, r.created_at, s.location_interval
+    FROM runners r CROSS JOIN settings s WHERE r.id = $1 AND s.id = 1
   `, [req.runner.id]);
-  const schedule = scheduleResult.rows[0];
-  if (!schedule) return res.status(404).json({ error: 'A menekülő nem található.' });
-
-  const baseTime = schedule.location_cycle_started_at || schedule.last_location_at || schedule.created_at;
-  const nextLocationAt = new Date(new Date(baseTime).getTime() + Number(schedule.location_interval) * 60000);
-  if (schedule.last_location_at && Date.now() < nextLocationAt.getTime()) {
-    return res.status(429).json({
-      error: 'A helyzetküldés még nem esedékes.',
-      next_location_at: nextLocationAt.toISOString()
-    });
+  const row = schedule.rows[0];
+  if (!row) return res.status(404).json({ error: 'Játékos nem található' });
+  if (row.last_location_at) {
+    const nextAllowed = new Date(new Date(row.last_location_at).getTime() + Number(row.location_interval) * 60000);
+    if (Date.now() < nextAllowed.getTime()) return res.status(429).json({ error: 'A helyzetküldés még nem esedékes.', next_location_at: nextAllowed.toISOString() });
   }
 
+  const hunter = (await db.query('SELECT latitude, longitude, speed, location_at FROM hunter_presence WHERE id = 1')).rows[0] || null;
+  const hunterDistance = hunter ? distanceInKm(latitude, longitude, hunter.latitude, hunter.longitude) : null;
   const now = new Date();
-  const hunterPresence = (await db.query(
-    'SELECT latitude, longitude, accuracy, speed, location_at, most_wanted_distance_km, most_wanted_speed, most_wanted_updated_at FROM hunter_presence WHERE id = 1'
-  )).rows[0] || null;
 
-  const hunterLat = normalizeCoordinate(hunterPresence?.latitude);
-  const hunterLng = normalizeCoordinate(hunterPresence?.longitude);
-  const hunterDistance = hunterLat !== null && hunterLng !== null
-    ? distanceInKm(latitude, longitude, hunterLat, hunterLng)
-    : null;
+  await db.query(`
+    UPDATE runners
+    SET last_latitude = $1, last_longitude = $2, last_accuracy = $3, last_speed = $4,
+        last_location_at = $5, location_cycle_started_at = $5,
+        live_latitude = $1, live_longitude = $2, live_accuracy = $3, live_speed = $4, live_location_at = $5,
+        last_hunter_distance_km = $6, last_hunter_speed = $7, last_hunter_location_at = $8
+    WHERE id = $9
+  `, [latitude, longitude, accuracy, speed, now, hunterDistance, hunter ? finiteNumber(hunter.speed) : null, hunter?.location_at || null, req.runner.id]);
 
-  const hunterSpeed = normalizeSpeedMps(hunterPresence?.speed);
-  const hunterLocationAt = hunterPresence?.location_at || null;
-
-  const client = await db.pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      `UPDATE runners
-       SET last_latitude = $1,
-           last_longitude = $2,
-           last_accuracy = $3,
-           last_speed = $4,
-           last_location_at = $5,
-           location_cycle_started_at = $5,
-           live_latitude = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_latitude ELSE NULL END,
-           live_longitude = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_longitude ELSE NULL END,
-           live_accuracy = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_accuracy ELSE NULL END,
-           live_speed = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_speed ELSE NULL END,
-           live_location_at = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_location_at ELSE NULL END,
-           last_hunter_distance_km = $6,
-           last_hunter_speed = $7,
-           last_hunter_location_at = $8
-       WHERE id = $9`,
-      [latitude, longitude, accuracy, speed, now, hunterDistance, hunterSpeed, hunterLocationAt, req.runner.id]
-    );
-    await client.query(
-      `INSERT INTO locations (runner_id, latitude, longitude, accuracy, speed)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [req.runner.id, latitude, longitude, accuracy, speed]
-    );
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('POST /api/location adatbázishiba:', error);
-    return res.status(500).json({ error: 'A helyzet mentése nem sikerült.' });
-  } finally {
-    client.release();
-  }
-
+  await db.query('INSERT INTO locations (runner_id, latitude, longitude, accuracy, speed) VALUES ($1, $2, $3, $4, $5)', [req.runner.id, latitude, longitude, accuracy, speed]);
   await logEvent('LOCATION_UPDATE', req.runner.id, `${req.runner.name} új hivatalos helyzetet küldött.`);
-  const next = new Date(now.getTime() + Number(schedule.location_interval) * 60000);
+
   res.json({
     success: true,
     last_location_at: now.toISOString(),
-    next_location_at: next.toISOString(),
-    hunter: hunterPresence ? {
-      latitude: hunterLat,
-      longitude: hunterLng,
-      accuracy: normalizeCoordinate(hunterPresence.accuracy),
-      speed: hunterSpeed,
-      location_at: hunterLocationAt,
-      distance_km: hunterDistance,
-      most_wanted_distance_km: normalizeCoordinate(hunterPresence.most_wanted_distance_km),
-      most_wanted_speed: normalizeSpeedMps(hunterPresence.most_wanted_speed),
-      most_wanted_updated_at: hunterPresence.most_wanted_updated_at || null
-    } : null
+    next_location_at: new Date(now.getTime() + Number(row.location_interval) * 60000).toISOString(),
+    hunter: hunter ? { ...hunter, distance_km: hunterDistance } : null
   });
 }));
 
-app.post('/api/runner/live-location', checkRunner, handleAsync(async (req, res) => {
-  const latitude = normalizeCoordinate(req.body.latitude);
-  const longitude = normalizeCoordinate(req.body.longitude);
-  const accuracy = normalizeCoordinate(req.body.accuracy);
-  const clientSpeed = normalizeSpeedMps(req.body.speed);
-  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-    return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
-  }
-
-  const current = (await db.query(
-    'SELECT penalty_until, live_latitude, live_longitude, live_location_at, live_speed FROM runners WHERE id = $1',
-    [req.runner.id]
-  )).rows[0];
-  if (!current) return res.status(404).json({ error: 'A menekülő nem található.' });
-
-  const penaltyUntil = current.penalty_until ? new Date(current.penalty_until) : null;
-  const penaltyActive = penaltyUntil && penaltyUntil.getTime() > Date.now();
-  if (!penaltyActive) {
-    return res.status(403).json({
-      error: 'Élő helyzetküldés csak aktív büntetés alatt engedélyezett.'
-    });
-  }
-
-  const now = new Date();
-  const measuredSpeed = computeSpeedMps(
-    {
-      latitude: current.live_latitude,
-      longitude: current.live_longitude,
-      location_at: current.live_location_at,
-    },
-    latitude,
-    longitude,
-    now,
-    clientSpeed
-  );
-
-  try {
-    await db.query(
-      `UPDATE runners
-       SET live_latitude = $1,
-           live_longitude = $2,
-           live_accuracy = $3,
-           live_speed = $4,
-           live_location_at = $5
-       WHERE id = $6`,
-      [latitude, longitude, accuracy, measuredSpeed, now, req.runner.id]
-    );
-  } catch (error) {
-    console.error('POST /api/runner/live-location adatbázishiba:', error);
-    return res.status(500).json({ error: 'Az élő helyzet mentése nem sikerült.' });
-  }
-
-  res.json({
-    success: true,
-    latitude,
-    longitude,
-    accuracy,
-    speed: measuredSpeed,
-    penalty_until: penaltyUntil.toISOString(),
-    location_at: now.toISOString()
-  });
+// Penalty-only live GPS. Never active just because a runner is Most Wanted.
+app.post('/api/runner/live-location', requireRunner, handleAsync(async (req, res) => {
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const accuracy = finiteNumber(req.body.accuracy);
+  const speed = finiteNumber(req.body.speed);
+  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
+  const fresh = (await db.query('SELECT penalty_until FROM runners WHERE id = $1', [req.runner.id])).rows[0];
+  if (!liveTrackingActive(fresh)) return res.status(409).json({ error: 'Nincs aktív folyamatos láthatósági büntetés.' });
+  await db.query(`UPDATE runners SET live_latitude = $1, live_longitude = $2, live_accuracy = $3, live_speed = $4, live_location_at = NOW() WHERE id = $5`, [latitude, longitude, accuracy, speed, req.runner.id]);
+  res.json({ success: true, live: true });
 }));
 
-// --- HUNTER API ---
-app.post('/api/settings', checkHunter, handleAsync(async (req, res) => {
-  const current = (await db.query('SELECT * FROM settings WHERE id = 1')).rows[0];
-  const locationInterval = Number(req.body.location_interval);
-  const liveUpdateInterval = Number(req.body.live_update_interval);
-  const nextInterval = Number.isInteger(locationInterval) && locationInterval > 0
-    ? locationInterval
-    : current.location_interval;
-  const nextLiveUpdateInterval = Number.isInteger(liveUpdateInterval) && liveUpdateInterval >= 1 && liveUpdateInterval <= 10
-    ? liveUpdateInterval
-    : current.live_update_interval;
-  const nextTitle = typeof req.body.game_title === 'string'
-    ? req.body.game_title.trim().slice(0, 120) || current.game_title
-    : current.game_title;
-  const nextDescription = typeof req.body.game_description === 'string'
-    ? req.body.game_description.trim().slice(0, 500)
-    : current.game_description;
-  const nextInstructions = typeof req.body.runner_instructions === 'string'
-    ? req.body.runner_instructions.trim().slice(0, 1000)
-    : current.runner_instructions;
-  const nextAnnouncement = typeof req.body.announcement === 'string'
-    ? req.body.announcement.trim().slice(0, 500)
-    : current.announcement;
-  const nextDistanceEnabled = typeof req.body.distance_enabled === 'boolean'
-    ? req.body.distance_enabled
-    : current.distance_enabled;
-  const nextSpeedEnabled = typeof req.body.speed_enabled === 'boolean'
-    ? req.body.speed_enabled
-    : current.speed_enabled;
-  const nextAlertsEnabled = typeof req.body.alerts_enabled === 'boolean'
-    ? req.body.alerts_enabled
-    : current.alerts_enabled;
-  const nextHighAccuracyEnabled = typeof req.body.high_accuracy_enabled === 'boolean'
-    ? req.body.high_accuracy_enabled
-    : current.high_accuracy_enabled;
-  const nextPenaltyEnabled = typeof req.body.penalty_enabled === 'boolean'
-    ? req.body.penalty_enabled
-    : current.penalty_enabled;
-  const nextGameStatus = ['waiting', 'live', 'paused', 'finished'].includes(req.body.game_status)
-    ? req.body.game_status
-    : current.game_status;
-  const nextAnnouncementPriority = getPriority(req.body.announcement_priority || current.announcement_priority);
-  const nextAccentColor = typeof req.body.accent_color === 'string'
-    && /^#[0-9a-f]{6}$/i.test(req.body.accent_color)
-    ? req.body.accent_color
-    : current.accent_color;
-
-  await db.query(`
-    UPDATE settings
-    SET location_interval = $1, game_title = $2, game_description = $3,
-        runner_instructions = $4, announcement = $5,
-        distance_enabled = $6, live_update_interval = $7,
-        speed_enabled = $8, alerts_enabled = $9,
-        high_accuracy_enabled = $10, penalty_enabled = $11,
-        game_status = $12, announcement_priority = $13,
-        accent_color = $14, updated_at = NOW()
-    WHERE id = 1
-  `, [
-    nextInterval, nextTitle, nextDescription, nextInstructions, nextAnnouncement,
-    nextDistanceEnabled, nextLiveUpdateInterval, nextSpeedEnabled, nextAlertsEnabled,
-    nextHighAccuracyEnabled, nextPenaltyEnabled, nextGameStatus,
-    nextAnnouncementPriority, nextAccentColor
-  ]);
-
-  if (nextInterval !== current.location_interval || nextLiveUpdateInterval !== current.live_update_interval) {
-    await db.query('UPDATE runners SET location_cycle_started_at = NOW()');
-    await logEvent(
-      'SETTINGS_CHANGED',
-      null,
-      `Játékbeállítások frissítve. Új intervallum: ${nextInterval} perc, élő frissítés: ${nextLiveUpdateInterval} mp.`
-    );
-  }
-  res.json({ success: true, settings: (await db.query('SELECT * FROM settings WHERE id = 1')).rows[0] });
+// HUNTER SETTINGS
+app.post('/api/settings', requireHunter, handleAsync(async (req, res) => {
+  const current = await getSettings();
+  const nInt = Number(req.body.location_interval);
+  const nLive = Number(req.body.live_update_interval);
+  const interval = Number.isInteger(nInt) && nInt > 0 ? nInt : current.location_interval;
+  const liveInterval = Number.isInteger(nLive) && nLive >= 1 && nLive <= 10 ? nLive : current.live_update_interval;
+  const text = (value, fallback, max) => typeof value === 'string' ? value.trim().slice(0, max) : fallback;
+  const next = {
+    game_title: text(req.body.game_title, current.game_title, 120),
+    game_description: text(req.body.game_description, current.game_description, 500),
+    runner_instructions: text(req.body.runner_instructions, current.runner_instructions, 1000),
+    announcement: text(req.body.announcement, current.announcement, 500),
+    distance_enabled: typeof req.body.distance_enabled === 'boolean' ? req.body.distance_enabled : current.distance_enabled,
+    speed_enabled: typeof req.body.speed_enabled === 'boolean' ? req.body.speed_enabled : current.speed_enabled,
+    alerts_enabled: typeof req.body.alerts_enabled === 'boolean' ? req.body.alerts_enabled : current.alerts_enabled,
+    high_accuracy_enabled: typeof req.body.high_accuracy_enabled === 'boolean' ? req.body.high_accuracy_enabled : current.high_accuracy_enabled,
+    penalty_enabled: typeof req.body.penalty_enabled === 'boolean' ? req.body.penalty_enabled : current.penalty_enabled,
+    game_status: ['waiting','live','paused','finished'].includes(req.body.game_status) ? req.body.game_status : current.game_status,
+    announcement_priority: getPriority(req.body.announcement_priority || current.announcement_priority),
+    accent_color: typeof req.body.accent_color === 'string' && /^#[0-9a-f]{6}$/i.test(req.body.accent_color) ? req.body.accent_color : current.accent_color
+  };
+  await db.query(`UPDATE settings SET location_interval=$1, live_update_interval=$2, game_title=$3, game_description=$4, runner_instructions=$5, announcement=$6, distance_enabled=$7, speed_enabled=$8, alerts_enabled=$9, high_accuracy_enabled=$10, penalty_enabled=$11, game_status=$12, announcement_priority=$13, accent_color=$14, updated_at=NOW() WHERE id=1`, [interval, liveInterval, next.game_title, next.game_description, next.runner_instructions, next.announcement, next.distance_enabled, next.speed_enabled, next.alerts_enabled, next.high_accuracy_enabled, next.penalty_enabled, next.game_status, next.announcement_priority, next.accent_color]);
+  if (interval !== Number(current.location_interval)) await db.query('UPDATE runners SET location_cycle_started_at = NOW()');
+  res.json({ success: true, settings: await getSettings() });
 }));
 
-app.post('/api/hunter/reset', checkHunter, handleAsync(async (req, res) => {
+app.post('/api/hunter/reset', requireHunter, handleAsync(async (req, res) => {
   await db.query('TRUNCATE locations, messages, events, runners RESTART IDENTITY CASCADE');
-  await db.query(`
-    UPDATE settings
-    SET location_interval = 20,
-        live_update_interval = 1,
-        distance_enabled = TRUE,
-        speed_enabled = TRUE,
-        alerts_enabled = TRUE,
-        high_accuracy_enabled = TRUE,
-        penalty_enabled = TRUE,
-        game_status = 'waiting',
-        announcement_priority = 'important',
-        accent_color = '#9b87f5',
-        game_title = 'Most Wanted - A hajsza',
-        game_description = 'A vadászok követik a menekülőket. A helyzeted automatikusan frissül.',
-        runner_instructions = 'Tartsd nyitva az oldalt, engedélyezd a helymeghatározást, és figyeld az automatikus jelzések visszaszámlálóját.',
-        announcement = 'A játék újraindult. Készülj a csatlakozásra.',
-        updated_at = NOW()
-    WHERE id = 1
-  `);
+  await db.query(`UPDATE settings SET location_interval=20, live_update_interval=1, distance_enabled=TRUE, speed_enabled=TRUE, alerts_enabled=TRUE, high_accuracy_enabled=TRUE, penalty_enabled=TRUE, game_status='waiting', announcement_priority='important', accent_color='#9b87f5', game_title='Most Wanted - A hajsza', game_description='A vadászok követik a menekülőket.', runner_instructions='Tartsd nyitva az oldalt és engedélyezd a helymeghatározást.', announcement='A játékhoz tartozó üzenetek itt jelennek meg.', updated_at=NOW() WHERE id=1`);
+  await db.query('UPDATE hunter_presence SET latitude=NULL, longitude=NULL, accuracy=NULL, speed=NULL, location_at=NULL, updated_at=NOW() WHERE id=1');
+  hunterPrevious = null;
+  lastMostWantedMeasureAt = 0;
   res.json({ success: true });
 }));
 
-app.post('/api/hunter/most-wanted', checkHunter, handleAsync(async (req, res) => {
+app.post('/api/hunter/most-wanted', requireHunter, handleAsync(async (req, res) => {
   const runnerId = req.body.runner_id ? Number(req.body.runner_id) : null;
-  await db.query('UPDATE runners SET is_most_wanted = FALSE');
-
+  await db.query('UPDATE runners SET is_most_wanted = FALSE, most_wanted_distance_km = NULL, most_wanted_speed = NULL, most_wanted_updated_at = NULL');
   if (runnerId) {
-    const runnerResult = await db.query(
-      'SELECT name FROM runners WHERE id = $1',
-      [runnerId]
-    );
-    const runner = runnerResult.rows[0];
+    const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId])).rows[0];
     if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
-
-    await db.query(
-      'UPDATE runners SET is_most_wanted = TRUE WHERE id = $1',
-      [runnerId]
-    );
-    await db.query(
-      'UPDATE hunter_presence SET most_wanted_distance_km = NULL, most_wanted_speed = NULL, most_wanted_updated_at = NULL WHERE id = 1'
-    );
-    await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted!`);
+    await db.query('UPDATE runners SET is_most_wanted=TRUE, most_wanted_updated_at=NULL WHERE id=$1', [runnerId]);
+    await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted.`);
   } else {
-    await db.query(
-      'UPDATE hunter_presence SET most_wanted_distance_km = NULL, most_wanted_speed = NULL, most_wanted_updated_at = NULL WHERE id = 1'
-    );
     await logEvent('MOST_WANTED_CLEARED', null, 'Most Wanted státusz törölve.');
   }
-
+  lastMostWantedMeasureAt = 0;
   res.json({ success: true });
 }));
 
-app.post('/api/hunter/penalty', checkHunter, handleAsync(async (req, res) => {
+app.post('/api/hunter/penalty', requireHunter, handleAsync(async (req, res) => {
   const runnerId = Number(req.body.runner_id);
   const minutes = Number(req.body.minutes);
-  if (!Number.isInteger(runnerId) || !Number.isInteger(minutes) || minutes < 0 || minutes > 10) {
-    return res.status(400).json({ error: 'A büntetés 0 és 10 perc közötti egész szám lehet.' });
-  }
-
-  const runnerResult = await db.query('SELECT name FROM runners WHERE id = $1', [runnerId]);
-  const runner = runnerResult.rows[0];
+  if (!Number.isInteger(runnerId) || !Number.isInteger(minutes) || minutes < 0 || minutes > 10) return res.status(400).json({ error: 'A büntetés 0 és 10 perc közötti egész szám lehet.' });
+  const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId])).rows[0];
   if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
-
-  const penaltyUntil = minutes === 0 ? null : new Date(Date.now() + minutes * 60 * 1000);
-  await db.query('UPDATE runners SET penalty_until = $1 WHERE id = $2', [penaltyUntil, runnerId]);
-  if (minutes > 0) {
-    await db.query(
-      'INSERT INTO messages (runner_id, message, priority) VALUES ($1, $2, $3)',
-      [
-        runnerId,
-        `Büntetést kaptál: a helyzeted ${minutes} percig folyamatosan látható lesz a vadász számára.`,
-        'urgent'
-      ]
-    );
-  } else {
-    await db.query(
-      'INSERT INTO messages (runner_id, message, priority) VALUES ($1, $2, $3)',
-      [runnerId, 'A folyamatos láthatósági büntetésed megszűnt.', 'important']
-    );
-  }
-  await logEvent(
-    minutes === 0 ? 'PENALTY_CLEARED' : 'PENALTY_SET',
-    runnerId,
-    minutes === 0
-      ? `${runner.name} büntetése lejárt vagy törölve lett.`
-      : `${runner.name} ${minutes} perces folyamatos láthatóságot kapott.`
-  );
-  res.json({ success: true, penalty_until: penaltyUntil ? penaltyUntil.toISOString() : null });
+  const until = minutes > 0 ? new Date(Date.now() + minutes * 60000) : null;
+  await db.query('UPDATE runners SET penalty_until=$1 WHERE id=$2', [until, runnerId]);
+  const text = minutes > 0 ? `Büntetést kaptál: ${minutes} percig folyamatosan látható a helyzeted a vadász számára.` : 'A folyamatos láthatósági büntetésed megszűnt.';
+  await db.query('INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)', [runnerId, text, minutes > 0 ? 'urgent' : 'important']);
+  await logEvent(minutes > 0 ? 'PENALTY_SET' : 'PENALTY_CLEARED', runnerId, minutes > 0 ? `${runner.name} ${minutes} perces folyamatos láthatóságot kapott.` : `${runner.name} büntetése törölve.`);
+  res.json({ success: true, penalty_until: until ? until.toISOString() : null });
 }));
 
-app.post('/api/hunter/location', checkHunter, handleAsync(async (req, res) => {
-  const latitude = normalizeCoordinate(req.body.latitude);
-  const longitude = normalizeCoordinate(req.body.longitude);
-  const accuracy = normalizeCoordinate(req.body.accuracy);
-  const clientSpeed = normalizeSpeedMps(req.body.speed);
-  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-    return res.status(400).json({ error: 'Érvénytelen vadász helyadat' });
-  }
-
-  const previous = (await db.query(
-    'SELECT latitude, longitude, location_at, speed FROM hunter_presence WHERE id = 1'
-  )).rows[0] || null;
+app.post('/api/hunter/location', requireHunter, handleAsync(async (req, res) => {
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const accuracy = finiteNumber(req.body.accuracy);
   const now = new Date();
-  const measuredSpeed = computeSpeedMps(previous, latitude, longitude, now, clientSpeed);
+  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) return res.status(400).json({ error: 'Érvénytelen vadász helyadat' });
+  const serverSpeed = currentHunterSpeedMetersPerSecond(latitude, longitude, now, req.body.speed);
+  await db.query('UPDATE hunter_presence SET latitude=$1, longitude=$2, accuracy=$3, speed=$4, location_at=$5, updated_at=NOW() WHERE id=1', [latitude, longitude, accuracy, serverSpeed, now]);
+  hunterPrevious = { lat: latitude, lng: longitude, at: now };
 
-  const currentSettings = (await db.query(
-    'SELECT location_interval FROM settings WHERE id = 1'
-  )).rows[0] || { location_interval: 20 };
-  const currentHunter = (await db.query(
-    'SELECT most_wanted_updated_at FROM hunter_presence WHERE id = 1'
-  )).rows[0] || null;
-  const intervalMs = Math.max(1, Number(currentSettings.location_interval) || 20) * 60 * 1000;
-  const lastMwMetricAt = currentHunter?.most_wanted_updated_at
-    ? new Date(currentHunter.most_wanted_updated_at).getTime()
-    : 0;
-  const shouldUpdateMostWanted = !lastMwMetricAt || now.getTime() - lastMwMetricAt >= intervalMs;
-
-  let mwDistance = null;
-  if (shouldUpdateMostWanted) {
-    const wanted = (await db.query(`
-      SELECT id,
-             CASE
-               WHEN penalty_until IS NOT NULL AND penalty_until > NOW() THEN live_latitude
-               ELSE last_latitude
-             END AS target_latitude,
-             CASE
-               WHEN penalty_until IS NOT NULL AND penalty_until > NOW() THEN live_longitude
-               ELSE last_longitude
-             END AS target_longitude
-      FROM runners
-      WHERE is_most_wanted = TRUE
-      LIMIT 1
-    `)).rows[0];
-    if (wanted) {
-      const targetLat = normalizeCoordinate(wanted.target_latitude);
-      const targetLng = normalizeCoordinate(wanted.target_longitude);
-      if (targetLat !== null && targetLng !== null) {
-        mwDistance = distanceInKm(latitude, longitude, targetLat, targetLng);
-      }
-    }
+  const s = await getSettings();
+  const mw = (await db.query('SELECT id, last_latitude, last_longitude, penalty_until FROM runners WHERE is_most_wanted = TRUE LIMIT 1')).rows[0];
+  const due = !lastMostWantedMeasureAt || Date.now() - lastMostWantedMeasureAt >= Number(s.location_interval) * 60000;
+  if (mw && due) {
+    const live = penaltyActive(mw);
+    const lat = live && mw.penalty_until ? (await db.query('SELECT live_latitude, live_longitude FROM runners WHERE id=$1', [mw.id])).rows[0] : mw;
+    const targetLat = lat?.live_latitude ?? mw.last_latitude;
+    const targetLng = lat?.live_longitude ?? mw.last_longitude;
+    const d = distanceInKm(targetLat, targetLng, latitude, longitude);
+    await db.query('UPDATE runners SET most_wanted_distance_km=$1, most_wanted_speed=$2, most_wanted_updated_at=$3 WHERE id=$4', [d, serverSpeed, now, mw.id]);
+    lastMostWantedMeasureAt = now.getTime();
   }
-
-  await db.query(
-    `UPDATE hunter_presence
-     SET latitude = $1,
-         longitude = $2,
-         accuracy = $3,
-         speed = $4,
-         location_at = $5,
-         updated_at = NOW(),
-         most_wanted_distance_km = CASE WHEN $6 THEN $7 ELSE most_wanted_distance_km END,
-         most_wanted_speed = CASE WHEN $6 THEN $4 ELSE most_wanted_speed END,
-         most_wanted_updated_at = CASE WHEN $6 THEN $5 ELSE most_wanted_updated_at END
-     WHERE id = 1`,
-    [latitude, longitude, accuracy, measuredSpeed, now, shouldUpdateMostWanted, mwDistance]
-  );
-
-  res.json({
-    success: true,
-    speed: measuredSpeed,
-    location_at: now.toISOString(),
-    most_wanted_distance_km: shouldUpdateMostWanted ? mwDistance : null,
-    most_wanted_updated_at: shouldUpdateMostWanted ? now.toISOString() : null
-  });
+  res.json({ success: true, speed: serverSpeed });
 }));
 
-app.post('/api/hunter/message', checkHunter, handleAsync(async (req, res) => {
-  const { runner_id: runnerId, message } = req.body;
+app.post('/api/hunter/message', requireHunter, handleAsync(async (req, res) => {
+  const message = String(req.body.message || '').trim();
+  if (!message) return res.status(400).json({ error: 'Az üzenet nem lehet üres' });
+  const runnerId = req.body.runner_id ? Number(req.body.runner_id) : null;
   const priority = getPriority(req.body.priority);
-  if (!message || !message.trim()) {
-    return res.status(400).json({ error: 'Az üzenet nem lehet üres' });
-  }
-
-  const normalizedRunnerId = runnerId ? Number(runnerId) : null;
-  await db.query(
-    'INSERT INTO messages (runner_id, message, priority) VALUES ($1, $2, $3)',
-    [normalizedRunnerId, message.trim(), priority]
-  );
-  await logEvent('MESSAGE_SENT', normalizedRunnerId, `[${priority.toUpperCase()}] Üzenet: ${message.trim()}`);
+  await db.query('INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)', [runnerId, message.slice(0, 500), priority]);
+  await logEvent('MESSAGE_SENT', runnerId, `[${priority.toUpperCase()}] Üzenet: ${message}`);
   res.json({ success: true });
 }));
 
-app.post('/api/runner/leave', checkRunner, handleAsync(async (req, res) => {
-  await db.query('DELETE FROM runners WHERE id = $1', [req.runner.id]);
+app.post('/api/runner/leave', requireRunner, handleAsync(async (req, res) => {
+  await db.query('DELETE FROM runners WHERE id=$1', [req.runner.id]);
   res.json({ success: true });
 }));
 
-app.get('/healthz', (req, res) => {
-  res.json({ ok: true });
-});
+app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error('API ERROR', req.method, req.originalUrl, err?.stack || err);
   if (res.headersSent) return next(err);
-  res.status(500).json({ error: 'Szerverhiba' });
+  res.status(500).json({ error: 'Szerverhiba', message: process.env.NODE_ENV === 'production' ? undefined : String(err?.message || err) });
 });
 
-const PORT = process.env.PORT || 3000;
-ensureDatabaseSchema()
-  .then(() => {
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`Szerver fut a ${PORT} porton`);
-    });
-  })
-  .catch((error) => {
-    console.error('Adatbázis inicializálási hiba:', error);
-    process.exit(1);
-  });
+const PORT = Number(process.env.PORT || 3000);
+(async () => {
+  await ensureSchema();
+  server.listen(PORT, '0.0.0.0', () => console.log(`Szerver fut a ${PORT} porton`));
+})().catch((error) => {
+  console.error('INDULÁSI HIBA', error?.stack || error);
+  process.exit(1);
+});
