@@ -6,7 +6,9 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 5
+  max: 5,
+  family: 4,
+  ssl: { rejectUnauthorized: false }
 });
 
 module.exports = {
