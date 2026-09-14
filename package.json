@@ -1,0 +1,17 @@
+{
+  "name": "most-wanted-pwa",
+  "version": "1.0.0",
+  "description": "Most Wanted Chase Game PWA",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "pg": "^8.23.0"
+  }
+}
