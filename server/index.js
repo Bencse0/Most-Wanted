@@ -13,15 +13,11 @@ const server = http.createServer(app);
 app.use(express.json({ limit: '32kb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
-app.use('/api', (req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  next();
-});
+app.use(express.static(path.join(__dirname, '..', 'public'), { etag: false, maxAge: 0 }));
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); next(); });
 
 const finiteNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
 const validCoordinate = (value, min, max) => Number.isFinite(Number(value)) && Number(value) >= min && Number(value) <= max;
-
 const distanceInKm = (lat1, lon1, lat2, lon2) => {
   if (![lat1, lon1, lat2, lon2].every((value) => Number.isFinite(Number(value)))) return null;
   const toRadians = (value) => Number(value) * Math.PI / 180;
@@ -31,7 +27,6 @@ const distanceInKm = (lat1, lon1, lat2, lon2) => {
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
   return earthRadius * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
-
 const getPriority = (value) => ['normal', 'important', 'urgent'].includes(value) ? value : 'normal';
 const penaltyActive = (runner) => runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
 const liveTrackingActive = penaltyActive;
@@ -60,47 +55,45 @@ function currentHunterSpeedMetersPerSecond(newLat, newLng, newAt, reportedSpeed)
   return Math.min((km * 1000) / dt, 100);
 }
 
-// Recalculate Most Wanted distance and speed continuously
-async function updateMostWantedStatus() {
-  const hunter = (await db.query('SELECT latitude, longitude, speed FROM hunter_presence WHERE id = 1')).rows[0];
-  if (!hunter || !Number.isFinite(Number(hunter.latitude)) || !Number.isFinite(Number(hunter.longitude))) return;
-
-  const mw = (await db.query('SELECT id, last_latitude, last_longitude, live_latitude, live_longitude, last_speed, live_speed, penalty_until FROM runners WHERE is_most_wanted = TRUE LIMIT 1')).rows[0];
-  if (!mw) return;
-
-  const isLive = mw.penalty_until && new Date(mw.penalty_until).getTime() > Date.now();
-  const targetLat = (isLive && Number.isFinite(Number(mw.live_latitude))) ? Number(mw.live_latitude) : Number(mw.last_latitude);
-  const targetLng = (isLive && Number.isFinite(Number(mw.live_longitude))) ? Number(mw.live_longitude) : Number(mw.last_longitude);
-
-  if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
-    const dist = distanceInKm(targetLat, targetLng, hunter.latitude, hunter.longitude);
-    const speed = (isLive && Number.isFinite(Number(mw.live_speed))) ? Number(mw.live_speed) : (Number.isFinite(Number(mw.last_speed)) ? Number(mw.last_speed) : finiteNumber(hunter.speed));
-    await db.query('UPDATE runners SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = NOW() WHERE id = $3', [dist, speed, mw.id]);
-  }
-}
-
-// Auth Helpers
-const hunterSessionSecret = () => process.env.HUNTER_SESSION_SECRET || process.env.SESSION_SECRET || process.env.HUNTER_PIN || 'change-me';
-
-function signSession(payload) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
-  return `${body}.${sig}`;
-}
-
-function verifySession(token) {
+// VALÓS IDEJŰ MOST WANTED SZÁMÍTÁS
+async function updateMostWantedMetrics() {
   try {
-    const [body, sig] = String(token || '').split('.');
-    if (!body || !sig) return false;
-    const expected = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    return payload.role === 'hunter' && payload.exp > Date.now();
-  } catch {
-    return false;
+    const mwResult = await db.query(
+      'SELECT id, last_latitude, last_longitude, live_latitude, live_longitude, last_speed, live_speed, penalty_until FROM runners WHERE is_most_wanted = TRUE LIMIT 1'
+    );
+    const mw = mwResult.rows[0];
+    if (!mw) return;
+
+    const hunterResult = await db.query('SELECT latitude, longitude FROM hunter_presence WHERE id = 1');
+    const hunter = hunterResult.rows[0];
+    if (!hunter || !validCoordinate(hunter.latitude, -90, 90) || !validCoordinate(hunter.longitude, -180, 180)) {
+      return;
+    }
+
+    const live = penaltyActive(mw);
+    const targetLat = (live && mw.live_latitude !== null && mw.live_latitude !== undefined) ? mw.live_latitude : mw.last_latitude;
+    const targetLng = (live && mw.live_longitude !== null && mw.live_longitude !== undefined) ? mw.live_longitude : mw.last_longitude;
+
+    if (!validCoordinate(targetLat, -90, 90) || !validCoordinate(targetLng, -180, 180)) {
+      return;
+    }
+
+    const dist = distanceInKm(targetLat, targetLng, hunter.latitude, hunter.longitude);
+    const rawSpeed = (live && mw.live_speed !== null && mw.live_speed !== undefined) ? mw.live_speed : mw.last_speed;
+    const speed = finiteNumber(rawSpeed);
+
+    await db.query(
+      `UPDATE runners 
+       SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = NOW() 
+       WHERE id = $3`,
+      [dist, speed, mw.id]
+    );
+  } catch (err) {
+    console.error('Hiba a Most Wanted adatok frissítésekor:', err);
   }
 }
 
+// AUTH
 app.post('/api/auth/runner', handleAsync(async (req, res) => {
   const gameCode = String(req.body.gameCode || '').trim();
   const name = String(req.body.name || '').trim();
@@ -117,6 +110,25 @@ app.post('/api/auth/runner', handleAsync(async (req, res) => {
   res.json({ token, id: runner.id, name: runner.name });
 }));
 
+const hunterSessionSecret = () => process.env.HUNTER_SESSION_SECRET || process.env.SESSION_SECRET || process.env.HUNTER_PIN || 'change-me';
+function signSession(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function verifySession(token) {
+  try {
+    const [body, sig] = String(token || '').split('.');
+    if (!body || !sig) return false;
+    const expected = crypto.createHmac('sha256', hunterSessionSecret()).update(body).digest('base64url');
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return payload.role === 'hunter' && payload.exp > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 app.post('/api/auth/hunter', handleAsync(async (req, res) => {
   const pin = String(req.body.pin || '');
   if (!process.env.HUNTER_PIN || pin !== process.env.HUNTER_PIN) return res.status(401).json({ error: 'Helytelen PIN kód' });
@@ -129,7 +141,6 @@ const requireHunter = (req, res, next) => {
   if (!verifySession(req.cookies.hunter_auth)) return res.status(401).json({ error: 'Nem jogosult' });
   next();
 };
-
 const requireRunner = handleAsync(async (req, res, next) => {
   const token = String(req.headers.authorization || '').trim();
   if (!token) return res.status(401).json({ error: 'Hiányzó token' });
@@ -153,7 +164,7 @@ const runnerSelect = `
 `;
 
 app.get('/api/state', requireHunter, handleAsync(async (req, res) => {
-  await updateMostWantedStatus();
+  await updateMostWantedMetrics();
   const [settings, runners, events, hunter] = await Promise.all([
     db.query('SELECT * FROM settings WHERE id = 1'),
     db.query(`${runnerSelect} ORDER BY r.id`),
@@ -209,7 +220,7 @@ app.get('/api/runner/updates', requireRunner, handleAsync(async (req, res) => {
   });
 }));
 
-// Official runner signal
+// Hivatalos helyzetküldés
 app.post('/api/location', requireRunner, handleAsync(async (req, res) => {
   const latitude = Number(req.body.latitude);
   const longitude = Number(req.body.longitude);
@@ -244,7 +255,7 @@ app.post('/api/location', requireRunner, handleAsync(async (req, res) => {
   await db.query('INSERT INTO locations (runner_id, latitude, longitude, accuracy, speed) VALUES ($1, $2, $3, $4, $5)', [req.runner.id, latitude, longitude, accuracy, speed]);
   await logEvent('LOCATION_UPDATE', req.runner.id, `${req.runner.name} új hivatalos helyzetet küldött.`);
 
-  await updateMostWantedStatus();
+  await updateMostWantedMetrics();
 
   res.json({
     success: true,
@@ -254,7 +265,7 @@ app.post('/api/location', requireRunner, handleAsync(async (req, res) => {
   });
 }));
 
-// Penalty live location
+// Élő helyzet (büntetés alatt)
 app.post('/api/runner/live-location', requireRunner, handleAsync(async (req, res) => {
   const latitude = Number(req.body.latitude);
   const longitude = Number(req.body.longitude);
@@ -264,8 +275,9 @@ app.post('/api/runner/live-location', requireRunner, handleAsync(async (req, res
   const fresh = (await db.query('SELECT penalty_until FROM runners WHERE id = $1', [req.runner.id])).rows[0];
   if (!liveTrackingActive(fresh)) return res.status(409).json({ error: 'Nincs aktív folyamatos láthatósági büntetés.' });
   await db.query(`UPDATE runners SET live_latitude = $1, live_longitude = $2, live_accuracy = $3, live_speed = $4, live_location_at = NOW() WHERE id = $5`, [latitude, longitude, accuracy, speed, req.runner.id]);
-
-  await updateMostWantedStatus();
+  
+  await updateMostWantedMetrics();
+  
   res.json({ success: true, live: true });
 }));
 
@@ -310,9 +322,9 @@ app.post('/api/hunter/most-wanted', requireHunter, handleAsync(async (req, res) 
   if (runnerId) {
     const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId])).rows[0];
     if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
-    await db.query('UPDATE runners SET is_most_wanted=TRUE, most_wanted_updated_at=NULL WHERE id=$1', [runnerId]);
+    await db.query('UPDATE runners SET is_most_wanted=TRUE WHERE id=$1', [runnerId]);
     await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted.`);
-    await updateMostWantedStatus();
+    await updateMostWantedMetrics();
   } else {
     await logEvent('MOST_WANTED_CLEARED', null, 'Most Wanted státusz törölve.');
   }
@@ -326,7 +338,7 @@ app.post('/api/hunter/penalty', requireHunter, handleAsync(async (req, res) => {
   const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId])).rows[0];
   if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
   const until = minutes > 0 ? new Date(Date.now() + minutes * 60000) : null;
-  await db.query('UPDATE runners SET penalty_until=$1 WHERE id=$2', [until, runnerId]);
+  await db.query('UPDATE runners SET penalty_until=$1 WHERE id=$2', [runnerId]);
   const text = minutes > 0 ? `Büntetést kaptál: ${minutes} percig folyamatosan látható a helyzeted a vadász számára.` : 'A folyamatos láthatósági büntetésed megszűnt.';
   await db.query('INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)', [runnerId, text, minutes > 0 ? 'urgent' : 'important']);
   await logEvent(minutes > 0 ? 'PENALTY_SET' : 'PENALTY_CLEARED', runnerId, minutes > 0 ? `${runner.name} ${minutes} perces folyamatos láthatóságot kapott.` : `${runner.name} büntetése törölve.`);
@@ -343,7 +355,8 @@ app.post('/api/hunter/location', requireHunter, handleAsync(async (req, res) => 
   await db.query('UPDATE hunter_presence SET latitude=$1, longitude=$2, accuracy=$3, speed=$4, location_at=$5, updated_at=NOW() WHERE id=1', [latitude, longitude, accuracy, serverSpeed, now]);
   hunterPrevious = { lat: latitude, lng: longitude, at: now };
 
-  await updateMostWantedStatus();
+  await updateMostWantedMetrics();
+
   res.json({ success: true, speed: serverSpeed });
 }));
 
