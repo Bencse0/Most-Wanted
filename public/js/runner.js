@@ -169,17 +169,18 @@ async function sendLiveMetrics() {
   if (!token || !isMostWantedActive() || !latestPosition || liveInFlight) return;
   const intervalMs = Math.max(1, Number(settings.live_update_interval) || 1) * 1000;
   if (Date.now() - lastLiveSentAt < intervalMs) return;
-  if (!hunter || !Number.isFinite(Number(hunter.latitude)) || !Number.isFinite(Number(hunter.longitude))) return;
 
   liveInFlight = true;
   const { coords } = latestPosition;
-  const distanceKm = getDistanceInKm(coords.latitude, coords.longitude, Number(hunter.latitude), Number(hunter.longitude));
   const speed = Number.isFinite(coords.speed) ? coords.speed : null;
   try {
+    // The coordinates are sent ONLY to the server-side metric endpoint so it can
+    // calculate distance from the hunter's current GPS. They are never used to
+    // move the hunter's map marker or exposed as live runner coordinates.
     const res = await fetch('/api/runner/live-metrics', {
       method:'POST',
       headers:{'Content-Type':'application/json', Authorization:token},
-      body:JSON.stringify({ distance_km: distanceKm, speed }),
+      body:JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, speed }),
       cache:'no-store'
     });
     if (res.status === 401) return clearRunnerSession();

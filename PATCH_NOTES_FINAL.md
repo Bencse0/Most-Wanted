@@ -30,3 +30,10 @@ A `game.db` nem szükséges a production működéshez.
 - A játékos saját eszközén a GPS-ből számolt sebesség és a hunter aktuális helyzete alapján számolt légvonalbeli távolság kerül periodikusan elküldésre a `live_update_interval` szerint.
 - A hunter csak ezt a két származtatott értéket látja élőben, valamint az utolsó frissítés időpontját.
 - A korábbi `/api/runner/live-location` végpont Most Wanted módban nem fogad pozíciót; az új `/api/runner/live-metrics` végpont kizárólag derived metrics adatot fogad.
+
+
+## Most Wanted live metrics correction
+- Most Wanted nem küld élő pozíciót a térképi megjelenítéshez.
+- A runner kliens a beállított `live_update_interval` szerint küld egy pillanatnyi GPS-mintát a szerver mérési endpointjára.
+- A szerver ezt csak arra használja, hogy kiszámolja a légvonalbeli távolságot a vadász aktuális GPS-éhez.
+- A hunter kizárólag a `most_wanted_distance_km`, `most_wanted_speed`, `most_wanted_updated_at` mezőket kapja vissza; a Most Wanted térképi ikonja továbbra is a legutóbbi hivatalos intervallumos helyzetet mutatja.

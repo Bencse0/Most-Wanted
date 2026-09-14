@@ -247,21 +247,50 @@ app.post('/api/location', requireRunner, handleAsync(async (req, res) => {
   });
 }));
 
-// Most Wanted live data sends ONLY derived metrics. Runner coordinates are never sent here.
+// Most Wanted live metrics: the runner sends a transient GPS sample so the server
+// can calculate distance against the hunter's current GPS. The live coordinates are
+// NOT stored in the runner's official location fields and are NOT returned to hunters.
 app.post('/api/runner/live-metrics', requireRunner, handleAsync(async (req, res) => {
-  const distanceKm = finiteNumber(req.body.distance_km);
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
   const speed = finiteNumber(req.body.speed);
-  if (!Number.isFinite(distanceKm) || distanceKm < 0 || distanceKm > 10000) return res.status(400).json({ error: 'Érvénytelen élő távolság' });
+  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) {
+    return res.status(400).json({ error: 'Érvénytelen élő GPS-adat' });
+  }
+
   const fresh = (await db.query('SELECT is_most_wanted FROM runners WHERE id = $1', [req.runner.id])).rows[0];
   if (!fresh?.is_most_wanted) return res.status(409).json({ error: 'A játékos nem Most Wanted.' });
+
+  const hunter = (await db.query('SELECT latitude, longitude FROM hunter_presence WHERE id = 1')).rows[0] || null;
+  if (!hunter || !validCoordinate(hunter.latitude, -90, 90) || !validCoordinate(hunter.longitude, -180, 180)) {
+    return res.status(409).json({ error: 'A vadász GPS-e még nem aktív.' });
+  }
+
+  const distanceKm = distanceInKm(latitude, longitude, hunter.latitude, hunter.longitude);
+  if (!Number.isFinite(distanceKm) || distanceKm < 0 || distanceKm > 10000) {
+    return res.status(400).json({ error: 'Érvénytelen élő távolság' });
+  }
+
   const now = new Date();
-  await db.query(`UPDATE runners SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = $3 WHERE id = $4`, [distanceKm, speed, now, req.runner.id]);
-  res.json({ success: true, most_wanted_distance_km: distanceKm, most_wanted_speed: speed, most_wanted_updated_at: now.toISOString() });
+  await db.query(
+    `UPDATE runners
+     SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = $3
+     WHERE id = $4`,
+    [distanceKm, speed, now, req.runner.id]
+  );
+
+  res.json({
+    success: true,
+    most_wanted_distance_km: distanceKm,
+    most_wanted_speed: speed,
+    most_wanted_updated_at: now.toISOString()
+  });
 }));
 
-// Legacy live-location endpoint: coordinates must never be uploaded for Most Wanted.
+// Live metrics never change the official interval-based runner position.
+// Keep this route for backwards compatibility with older clients.
 app.post('/api/runner/live-location', requireRunner, handleAsync(async (req, res) => {
-  return res.status(410).json({ error: 'A Most Wanted mód csak sebesség- és távolságadatot küld; a pozíció marad az intervallumos helyzetjelzés.' });
+  return res.status(410).json({ error: 'A Most Wanted élő mód csak sebesség- és távolságadatot frissít; a térképi pozíció az intervallumos helyzetjelzés marad.' });
 }));
 
 // HUNTER SETTINGS
