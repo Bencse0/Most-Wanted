@@ -109,9 +109,14 @@ app.get('/api/state', handleAsync(async (req, res) => {
               r.last_speed, r.live_latitude, r.live_longitude, r.live_accuracy,
               r.live_speed, r.live_location_at, r.penalty_until,
               r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
-              r.created_at, r.location_cycle_started_at,
-              (r.is_most_wanted OR (r.penalty_until IS NOT NULL AND r.penalty_until > NOW()))
-                AS live_tracking_required,
+             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_latitude ELSE NULL END AS live_latitude,
+             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_longitude ELSE NULL END AS live_longitude,
+             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_accuracy ELSE NULL END AS live_accuracy,
+             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_speed ELSE NULL END AS live_speed,
+             CASE WHEN r.penalty_until IS NOT NULL AND r.penalty_until > NOW() THEN r.live_location_at ELSE NULL END AS live_location_at,
+             r.created_at, r.location_cycle_started_at,
+             (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
+               AS live_tracking_required,
              COALESCE(location_cycle_started_at, last_location_at, created_at)
                + (s.location_interval * INTERVAL '1 minute') AS next_location_at
       FROM runners r
@@ -138,7 +143,7 @@ app.get('/api/runner/me', checkRunner, handleAsync(async (req, res) => {
            r.live_speed, r.live_location_at, r.penalty_until,
            r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
            r.last_location_at, r.created_at, r.location_cycle_started_at,
-           (r.is_most_wanted OR (r.penalty_until IS NOT NULL AND r.penalty_until > NOW()))
+           (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
              AS live_tracking_required,
            COALESCE(r.location_cycle_started_at, r.last_location_at, r.created_at)
              + (s.location_interval * INTERVAL '1 minute') AS next_location_at,
@@ -210,7 +215,7 @@ app.get('/api/runner/updates', checkRunner, handleAsync(async (req, res) => {
              r.location_cycle_started_at, r.live_latitude, r.live_longitude,
              r.live_accuracy, r.live_speed, r.live_location_at, r.penalty_until,
              r.last_hunter_distance_km, r.last_hunter_speed, r.last_hunter_location_at,
-             (r.is_most_wanted OR (r.penalty_until IS NOT NULL AND r.penalty_until > NOW()))
+             (r.penalty_until IS NOT NULL AND r.penalty_until > NOW())
                AS live_tracking_required,
              COALESCE(r.location_cycle_started_at, r.last_location_at, r.created_at)
                + (s.location_interval * INTERVAL '1 minute') AS next_location_at
@@ -223,16 +228,12 @@ app.get('/api/runner/updates', checkRunner, handleAsync(async (req, res) => {
 
   const currentRunner = runner.rows[0];
   const currentHunter = hunter.rows[0] || null;
-  const hunterDistance = currentHunter && currentRunner
-    ? distanceInKm(currentRunner.live_latitude, currentRunner.live_longitude, currentHunter.latitude, currentHunter.longitude)
-    : null;
   res.json({
     settings: settings.rows[0],
     messages: messages.rows,
     runner: currentRunner,
     hunter: currentHunter ? {
-      ...currentHunter,
-      distance_km: hunterDistance
+      ...currentHunter
     } : null
   });
 }));
@@ -303,6 +304,15 @@ app.post('/api/runner/live-location', checkRunner, handleAsync(async (req, res) 
   const { latitude, longitude, accuracy, speed } = req.body;
   if (![latitude, longitude].every((value) => Number.isFinite(Number(value)))) {
     return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
+  }
+
+  const currentRunner = (await db.query(
+    'SELECT penalty_until FROM runners WHERE id = $1'
+  )).rows[0];
+  const penaltyActive = currentRunner?.penalty_until
+    && new Date(currentRunner.penalty_until).getTime() > Date.now();
+  if (!penaltyActive) {
+    return res.status(403).json({ error: 'Élő helyzetküldés csak aktív büntetés alatt engedélyezett.' });
   }
 
   await db.query(
@@ -477,19 +487,41 @@ app.post('/api/hunter/penalty', checkHunter, handleAsync(async (req, res) => {
 }));
 
 app.post('/api/hunter/location', checkHunter, handleAsync(async (req, res) => {
-  const { latitude, longitude, accuracy, speed } = req.body;
+  const { latitude, longitude, accuracy, speed, timestamp } = req.body;
   if (![latitude, longitude].every((value) => Number.isFinite(Number(value)))) {
     return res.status(400).json({ error: 'Érvénytelen vadász helyadat' });
+  }
+
+  const previous = (await db.query(
+    'SELECT latitude, longitude, location_at, speed FROM hunter_presence WHERE id = 1'
+  )).rows[0] || null;
+
+  const now = new Date();
+  const clientSpeed = finiteNumber(speed);
+  let measuredSpeed = clientSpeed;
+
+  if (previous && Number.isFinite(Number(previous.latitude)) && Number.isFinite(Number(previous.longitude)) && previous.location_at) {
+    const elapsedSeconds = (now.getTime() - new Date(previous.location_at).getTime()) / 1000;
+    const meters = distanceInKm(
+      previous.latitude,
+      previous.longitude,
+      latitude,
+      longitude
+    ) * 1000;
+    if (elapsedSeconds > 0.5 && Number.isFinite(meters)) {
+      const derivedSpeed = meters / elapsedSeconds;
+      if (derivedSpeed <= 100) measuredSpeed = derivedSpeed;
+    }
   }
 
   await db.query(
     `UPDATE hunter_presence
      SET latitude = $1, longitude = $2, accuracy = $3, speed = $4,
-         location_at = NOW(), updated_at = NOW()
+         location_at = $5, updated_at = NOW()
      WHERE id = 1`,
-    [latitude, longitude, accuracy ?? null, finiteNumber(speed)]
+    [latitude, longitude, accuracy ?? null, measuredSpeed, now]
   );
-  res.json({ success: true });
+  res.json({ success: true, speed: measuredSpeed, location_at: now.toISOString() });
 }));
 
 app.post('/api/hunter/message', checkHunter, handleAsync(async (req, res) => {

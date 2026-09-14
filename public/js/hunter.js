@@ -8,6 +8,9 @@ let hunterWatchId = null;
 let hunterPostInFlight = false;
 let stateRequestInFlight = false;
 let settingsLoaded = false;
+let lastPostedHunterPositionTimestamp = 0;
+let penaltyMenuInteracting = false;
+let penaltyMenuResumeTimer = null;
 const penaltySelections = {};
 
 async function loginHunter() {
@@ -44,30 +47,32 @@ function startHunterGPS() {
             document.getElementById('hunter-gps-status').innerText =
                 `VADÁSZ GPS: AKTÍV · ±${Math.round(position.coords.accuracy || 0)} m`;
             renderRunners();
+            postHunterLocation(position);
         },
         () => {
             document.getElementById('hunter-gps-status').innerText = 'VADÁSZ GPS: NEM ELÉRHETŐ';
         },
         { enableHighAccuracy: settings.high_accuracy_enabled !== false, timeout: 15000, maximumAge: 1000 }
     );
-    setInterval(postHunterLocation, 1000);
 }
 
-async function postHunterLocation() {
-    if (!hunterPosition || hunterPostInFlight) return;
+async function postHunterLocation(position = hunterPosition) {
+    if (!position || hunterPostInFlight || position.timestamp === lastPostedHunterPositionTimestamp) return;
     hunterPostInFlight = true;
-    const { coords } = hunterPosition;
+    const { coords } = position;
     try {
-        await fetch('/api/hunter/location', {
+        const res = await fetch('/api/hunter/location', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 latitude: coords.latitude,
                 longitude: coords.longitude,
                 accuracy: coords.accuracy,
-                speed: coords.speed
+                speed: coords.speed,
+                timestamp: position.timestamp
             })
         });
+        if (res.ok) lastPostedHunterPositionTimestamp = position.timestamp;
     } finally {
         hunterPostInFlight = false;
     }
@@ -121,16 +126,22 @@ function updateStats() {
     document.getElementById('stat-runners').innerText = runnersData.length;
     document.getElementById('stat-active').innerText = active;
     document.getElementById('stat-wanted').innerText = wanted ? wanted.name : '—';
-    document.getElementById('stat-hunter-speed').innerText = hunterPosition?.coords?.speed != null
-        ? `${toKmh(hunterPosition.coords.speed).toFixed(1)} km/h` : '—';
+    document.getElementById('stat-hunter-speed').innerText = hunterPresence?.speed != null
+        ? `${toKmh(hunterPresence.speed).toFixed(1)} km/h` : '—';
 }
 
 function isLate(runner) {
     return runner.next_location_at && Date.now() > new Date(runner.next_location_at).getTime();
 }
 
+function isPenaltyActive(runner) {
+    return Boolean(runner.penalty_until)
+        && new Date(runner.penalty_until).getTime() > Date.now();
+}
+
 function getMapCoordinates(runner) {
-    const liveFresh = runner.live_location_at
+    const penaltyActive = isPenaltyActive(runner);
+    const liveFresh = penaltyActive && runner.live_location_at
         && Date.now() - new Date(runner.live_location_at).getTime() < 90000;
     const liveCoordinatesExist = runner.live_latitude !== null && runner.live_longitude !== null;
     const officialCoordinatesExist = runner.last_latitude !== null && runner.last_longitude !== null;
@@ -142,6 +153,7 @@ function getMapCoordinates(runner) {
 }
 
 function renderRunners() {
+    if (penaltyMenuInteracting) return;
     const list = document.getElementById('runner-list');
     const activeElement = document.activeElement;
     if (activeElement && list.contains(activeElement)
@@ -168,16 +180,10 @@ function renderRunners() {
         const lastTime = runner.last_location_at ? formatDateTime(runner.last_location_at) : 'Még nem küldött';
         const nextTime = runner.next_location_at ? formatDateTime(runner.next_location_at) : '--:--';
         const liveTime = runner.live_location_at ? formatDateTime(runner.live_location_at) : '—';
-        let distanceStr = '—';
-        if (runner.is_most_wanted && hunterPosition && hasCoords && settings.distance_enabled !== false) {
-            const distance = getDistanceInKm(
-                hunterPosition.coords.latitude,
-                hunterPosition.coords.longitude,
-                coords.lat,
-                coords.lng
-            );
-            distanceStr = `${distance.toFixed(2)} km`;
-        }
+        const snapshotDistance = Number(runner.last_hunter_distance_km);
+        const distanceStr = settings.distance_enabled !== false && Number.isFinite(snapshotDistance)
+            ? `${snapshotDistance.toFixed(2)} km`
+            : '—';
         if (hasCoords) {
             if (!markers[runner.id]) {
                 markers[runner.id] = L.marker([coords.lat, coords.lng], {
@@ -188,15 +194,18 @@ function renderRunners() {
                 markers[runner.id].setIcon(runnerIcon(runner.is_most_wanted, coords.live));
             }
             markers[runner.id].bindPopup(
-                `<b>${escapeHtml(runner.name)}</b><br>${coords.live ? 'Élő GPS' : 'Hivatalos jel'}: ${liveTime}`
+                `<b>${escapeHtml(runner.name)}</b><br>${coords.live ? 'Élő GPS' : 'Hivatalos jel'}: ${coords.live ? liveTime : lastTime}`
             );
         }
 
-        const penaltyActive = runner.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
-        const speed = Number.isFinite(Number(runner.live_speed)) ? `${toKmh(runner.live_speed).toFixed(1)} km/h` : '—';
+        const penaltyActive = isPenaltyActive(runner);
+        const snapshotSpeed = Number(runner.last_hunter_speed);
+        const speed = Number.isFinite(snapshotSpeed) ? `${toKmh(snapshotSpeed).toFixed(1)} km/h` : '—';
         const cardClass = `runner-card ${late ? 'late' : 'active'} ${runner.is_most_wanted ? 'most-wanted' : ''}`;
         const mwBadge = runner.is_most_wanted ? '<span class="mw-badge">MOST WANTED</span>' : '';
-        const penaltyLabel = penaltyActive ? `Élő követés ${formatDateTime(runner.penalty_until)}-ig` : 'Büntetés nincs aktív';
+        const penaltyLabel = penaltyActive
+            ? `Élő követés ${formatDateTime(runner.penalty_until)}-ig`
+            : 'Időzített követés';
         const selectedPenalty = String(penaltySelections[runner.id] || 0);
         const action = runner.is_most_wanted
             ? '<button class="small-button danger" onclick="setMostWanted(null)">CÉLPONT LEVÉTELE</button>'
@@ -213,8 +222,8 @@ function renderRunners() {
                     <span>Legutóbbi jel<b>${lastTime}</b></span>
                     <span>Következő jel<b>${nextTime}</b></span>
                     <span>Pontosság<b>${runner.live_accuracy || runner.last_accuracy ? `${Math.round(runner.live_accuracy || runner.last_accuracy)} m` : '—'}</b></span>
-                    <span>Távolság a vadásztól<b>${runner.is_most_wanted ? distanceStr : '—'}</b></span>
-                    <span>Sebesség<b>${runner.is_most_wanted && settings.speed_enabled !== false ? speed : 'Rejtett'}</b></span>
+                    <span>Távolság a vadásztól<b>${distanceStr}</b></span>
+                    <span>Sebesség<b>${settings.speed_enabled !== false ? speed : 'Rejtett'}</b></span>
                     <span>Állapot<b>${penaltyLabel}</b></span>
                 </div>
                 <div class="runner-actions">
@@ -234,7 +243,30 @@ function renderRunners() {
 
 function rememberPenaltySelection(runnerId, value) {
     penaltySelections[runnerId] = value;
+    releasePenaltyMenuSoon();
 }
+
+function releasePenaltyMenuSoon() {
+    clearTimeout(penaltyMenuResumeTimer);
+    penaltyMenuResumeTimer = setTimeout(() => {
+        penaltyMenuInteracting = false;
+        fetchState();
+    }, 800);
+}
+
+document.addEventListener('pointerdown', (event) => {
+    if (event.target instanceof HTMLSelectElement && event.target.classList.contains('penalty-select')) {
+        penaltyMenuInteracting = true;
+        clearTimeout(penaltyMenuResumeTimer);
+    }
+});
+
+document.addEventListener('focusin', (event) => {
+    if (event.target instanceof HTMLSelectElement && event.target.classList.contains('penalty-select')) {
+        penaltyMenuInteracting = true;
+        clearTimeout(penaltyMenuResumeTimer);
+    }
+});
 
 function runnerIcon(isWanted, live) {
     return L.divIcon({
@@ -247,12 +279,13 @@ function runnerIcon(isWanted, live) {
 }
 
 async function setMostWanted(id) {
-    await fetch('/api/hunter/most-wanted', {
+    const res = await fetch('/api/hunter/most-wanted', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runner_id: id })
     });
-    fetchState();
+    if (!res.ok) return showHunterToast('A Most Wanted beállítása nem sikerült.', 'urgent');
+    await fetchState();
 }
 
 async function setPenalty(runnerId) {
@@ -263,9 +296,10 @@ async function setPenalty(runnerId) {
         body: JSON.stringify({ runner_id: runnerId, minutes })
     });
     if (!res.ok) return showHunterToast('A büntetés aktiválása nem sikerült.', 'urgent');
+    delete penaltySelections[runnerId];
     document.activeElement?.blur();
     showHunterToast(minutes ? `A folyamatos láthatóság ${minutes} percre aktív.` : 'A büntetés törölve.', 'normal');
-    fetchState();
+    await fetchState();
 }
 
 async function updateSettings() {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'most-wanted-v3';
+const CACHE_NAME = 'most-wanted-v4';
 const ASSETS = [
   '/',
   '/index.html',

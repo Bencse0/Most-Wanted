@@ -13,6 +13,7 @@ let timersStarted = false;
 let watchId = null;
 let lastAnnouncement = '';
 let lastAnnouncementPriority = '';
+let lastHunterSnapshotKey = '';
 const shownMessageIds = new Set();
 
 if (token) {
@@ -101,10 +102,11 @@ function applyRunner(nextRunner) {
         document.getElementById('r-next').innerText = formatDateTime(nextLocationAt);
     }
     document.getElementById('r-name').innerText = runner.name || 'MENEKÜLŐ';
-    document.getElementById('r-penalty').innerText = runner.penalty_until
+    const penaltyActive = runner.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
+    document.getElementById('r-penalty').innerText = penaltyActive
         ? `FOLYAMATOS LÁTHATÓSÁG · ${formatDateTime(runner.penalty_until)}-IG`
         : 'IDŐZÍTETT KÖVETÉS';
-    document.getElementById('r-penalty').classList.toggle('active', Boolean(runner.penalty_until));
+    document.getElementById('r-penalty').classList.toggle('active', Boolean(penaltyActive));
 }
 
 async function pollRunnerUpdates() {
@@ -117,7 +119,11 @@ async function pollRunnerUpdates() {
     applySettings(data.settings);
     applyRunner(data.runner);
     hunter = data.hunter;
-    applyHunterStatus();
+    const snapshotKey = `${data.runner?.last_location_at || ''}|${data.runner?.last_hunter_location_at || ''}|${data.runner?.last_hunter_distance_km ?? ''}|${data.runner?.last_hunter_speed ?? ''}`;
+    if (snapshotKey !== lastHunterSnapshotKey) {
+        lastHunterSnapshotKey = snapshotKey;
+        applyHunterStatus();
+    }
 
     (data.messages || []).slice().reverse().forEach((message) => {
         if (!shownMessageIds.has(message.id)) {
@@ -129,11 +135,9 @@ async function pollRunnerUpdates() {
 }
 
 function applyHunterStatus() {
-    const distance = Number.isFinite(Number(runner?.last_hunter_distance_km))
-        ? runner.last_hunter_distance_km
-        : hunter?.distance_km;
-    const speed = runner?.last_hunter_speed ?? hunter?.speed;
-    const locationAt = runner?.last_hunter_location_at ?? hunter?.location_at;
+    const distance = runner?.last_hunter_distance_km;
+    const speed = runner?.last_hunter_speed;
+    const locationAt = runner?.last_hunter_location_at;
     document.getElementById('r-hunter-distance').innerText =
         settings.distance_enabled && Number.isFinite(Number(distance))
             ? `${Number(distance).toFixed(2)} km`
