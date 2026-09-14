@@ -42,6 +42,114 @@ const distanceInKm = (lat1, lon1, lat2, lon2) => {
 
 const getPriority = (value) => ['normal', 'important', 'urgent'].includes(value) ? value : 'normal';
 
+async function ensureDatabaseSchema() {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS runners (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE,
+      last_latitude DOUBLE PRECISION,
+      last_longitude DOUBLE PRECISION,
+      last_accuracy DOUBLE PRECISION,
+      last_location_at TIMESTAMPTZ,
+      last_speed DOUBLE PRECISION,
+      live_latitude DOUBLE PRECISION,
+      live_longitude DOUBLE PRECISION,
+      live_accuracy DOUBLE PRECISION,
+      live_speed DOUBLE PRECISION,
+      live_location_at TIMESTAMPTZ,
+      penalty_until TIMESTAMPTZ,
+      last_hunter_distance_km DOUBLE PRECISION,
+      last_hunter_speed DOUBLE PRECISION,
+      last_hunter_location_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      location_cycle_started_at TIMESTAMPTZ
+    )`,
+    `CREATE TABLE IF NOT EXISTS locations (
+      id BIGSERIAL PRIMARY KEY,
+      runner_id BIGINT REFERENCES runners(id) ON DELETE CASCADE,
+      latitude DOUBLE PRECISION NOT NULL,
+      longitude DOUBLE PRECISION NOT NULL,
+      accuracy DOUBLE PRECISION,
+      speed DOUBLE PRECISION,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY,
+      location_interval INTEGER NOT NULL DEFAULT 20,
+      distance_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      game_title TEXT NOT NULL DEFAULT 'Most Wanted - A hajsza',
+      game_description TEXT NOT NULL DEFAULT '',
+      runner_instructions TEXT NOT NULL DEFAULT '',
+      announcement TEXT NOT NULL DEFAULT '',
+      live_update_interval INTEGER NOT NULL DEFAULT 1,
+      speed_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      high_accuracy_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      penalty_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      game_status TEXT NOT NULL DEFAULT 'waiting',
+      announcement_priority TEXT NOT NULL DEFAULT 'important',
+      accent_color TEXT NOT NULL DEFAULT '#9b87f5'
+    )`,
+    `CREATE TABLE IF NOT EXISTS messages (
+      id BIGSERIAL PRIMARY KEY,
+      runner_id BIGINT REFERENCES runners(id) ON DELETE CASCADE,
+      message TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS events (
+      id BIGSERIAL PRIMARY KEY,
+      type TEXT,
+      runner_id BIGINT REFERENCES runners(id) ON DELETE SET NULL,
+      data TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS hunter_presence (
+      id INTEGER PRIMARY KEY,
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
+      accuracy DOUBLE PRECISION,
+      speed DOUBLE PRECISION,
+      location_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_speed DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_latitude DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_longitude DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_accuracy DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_speed DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS live_location_at TIMESTAMPTZ`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS penalty_until TIMESTAMPTZ`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_distance_km DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_speed DOUBLE PRECISION`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_hunter_location_at TIMESTAMPTZ`,
+    `ALTER TABLE runners ADD COLUMN IF NOT EXISTS location_cycle_started_at TIMESTAMPTZ`,
+    `ALTER TABLE locations ADD COLUMN IF NOT EXISTS speed DOUBLE PRECISION`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_title TEXT NOT NULL DEFAULT 'Most Wanted - A hajsza'`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_description TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS runner_instructions TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS announcement TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS live_update_interval INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS speed_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS high_accuracy_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS penalty_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_status TEXT NOT NULL DEFAULT 'waiting'`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS announcement_priority TEXT NOT NULL DEFAULT 'important'`,
+    `ALTER TABLE settings ADD COLUMN IF NOT EXISTS accent_color TEXT NOT NULL DEFAULT '#9b87f5'`,
+    `INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
+    `INSERT INTO hunter_presence (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
+  ];
+  for (const statement of statements) await db.query(statement);
+}
+
 // --- AUTH API ---
 app.post('/api/auth/runner', handleAsync(async (req, res) => {
   const { gameCode, name } = req.body;
@@ -498,19 +606,18 @@ app.post('/api/hunter/location', checkHunter, handleAsync(async (req, res) => {
 
   const now = new Date();
   const clientSpeed = finiteNumber(speed);
-  let measuredSpeed = clientSpeed;
+  let measuredSpeed = clientSpeed !== null && clientSpeed >= 0 && clientSpeed <= 100
+    ? clientSpeed
+    : null;
 
-  if (previous && Number.isFinite(Number(previous.latitude)) && Number.isFinite(Number(previous.longitude)) && previous.location_at) {
+  if (measuredSpeed === null && previous && Number.isFinite(Number(previous.latitude))
+      && Number.isFinite(Number(previous.longitude)) && previous.location_at) {
     const elapsedSeconds = (now.getTime() - new Date(previous.location_at).getTime()) / 1000;
-    const meters = distanceInKm(
-      previous.latitude,
-      previous.longitude,
-      latitude,
-      longitude
-    ) * 1000;
+    const distanceKm = distanceInKm(previous.latitude, previous.longitude, latitude, longitude);
+    const meters = Number.isFinite(distanceKm) ? distanceKm * 1000 : null;
     if (elapsedSeconds > 0.5 && Number.isFinite(meters)) {
       const derivedSpeed = meters / elapsedSeconds;
-      if (derivedSpeed <= 100) measuredSpeed = derivedSpeed;
+      if (derivedSpeed >= 0 && derivedSpeed <= 100) measuredSpeed = derivedSpeed;
     }
   }
 
@@ -556,6 +663,13 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Szerver fut a ${PORT} porton`);
-});
+ensureDatabaseSchema()
+  .then(() => {
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Szerver fut a ${PORT} porton`);
+    });
+  })
+  .catch((error) => {
+    console.error('Adatbázis inicializálási hiba:', error);
+    process.exit(1);
+  });
