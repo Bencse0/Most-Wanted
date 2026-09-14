@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Menekülő · Most Wanted</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="runner-page">
+    <div id="alert-banner" class="alert-banner" role="alert">
+        <div class="alert-mark">!</div>
+        <div>
+            <strong id="alert-title">FONTOS KÖZLEMÉNY</strong>
+            <p id="alert-body"></p>
+        </div>
+    </div>
+
+    <main class="app-shell narrow-shell" id="login-view">
+        <section class="auth-card">
+            <div class="brand-lockup"><span class="brand-mark">MW</span><span>MOST WANTED</span></div>
+            <p class="eyebrow">MENEKÜLŐI BELÉPÉS</p>
+            <h1>Lépj be a hajsza élő rendszerébe.</h1>
+            <p class="muted">A GPS-ed csak a beállított időpontban küld hivatalos helyzetet. Engedélyezd a helymeghatározást a játékhoz.</p>
+            <label for="game-code">Játékkód</label>
+            <input type="text" id="game-code" placeholder="MW-2026" autocomplete="off">
+            <label for="runner-name">Azonosítód</label>
+            <input type="text" id="runner-name" placeholder="A játékban használt neved" autocomplete="nickname">
+            <button class="primary-button" onclick="joinGame()">CSATLAKOZÁS</button>
+        </section>
+    </main>
+
+    <main class="app-shell narrow-shell" id="dashboard-view" style="display: none;">
+        <header class="page-header">
+            <div>
+                <div class="brand-lockup"><span class="brand-mark">MW</span><span>MOST WANTED</span></div>
+                <p class="eyebrow">AKTÍV MENEKÜLŐ</p>
+                <h1 id="r-name">MENEKÜLŐ</h1>
+            </div>
+            <button class="ghost-button" onclick="leaveGame()">KILÉPÉS</button>
+        </header>
+
+        <section class="game-hero">
+            <div>
+                <p class="eyebrow">JÁTÉK</p>
+                <h2 id="r-game-title">Most Wanted - A hajsza</h2>
+                <p id="r-game-description" class="muted">A vadászok követik a menekülőket.</p>
+            </div>
+            <span class="status-chip" id="r-game-status">VÁRAKOZÁS</span>
+        </section>
+
+        <section class="runner-status-card">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">KÖVETÉSI ÁLLAPOT</p>
+                    <h2 id="r-status">INDULÁSRA KÉSZ</h2>
+                </div>
+                <span class="live-pill" id="r-live-pill">ONLINE</span>
+            </div>
+            <p class="status-detail" id="r-status-detail">A hivatalos helyzetjelzés az időzítő lejártakor indul.</p>
+            <div class="status-progress"><span></span></div>
+            <div class="sub-status">
+                <span id="r-gps">GPS KERESÉSE</span>
+                <span id="r-penalty">IDŐZÍTETT KÖVETÉS</span>
+            </div>
+        </section>
+
+        <section class="timer-panel">
+            <p class="eyebrow">KÖVETKEZŐ HIVATALOS JELZÉS</p>
+            <div class="timer-huge" id="countdown">--:--:--</div>
+            <div class="data-grid three">
+                <div class="data-tile"><span>UTOLSÓ JEL</span><strong id="r-last">--:--</strong></div>
+                <div class="data-tile"><span>KÖVETKEZIK</span><strong id="r-next">--:--</strong></div>
+                <div class="data-tile"><span>INTERVALLUM</span><strong id="r-interval">20 perc</strong></div>
+            </div>
+        </section>
+
+        <section class="proximity-panel">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">VADÁSZ AKTIVITÁS</p>
+                    <h2>A közeledő veszély</h2>
+                </div>
+                <span class="radar-dot"></span>
+            </div>
+            <div class="data-grid two">
+                <div class="data-tile accent-tile"><span>LÉGVONALBELI TÁVOLSÁG</span><strong id="r-hunter-distance">Nem elérhető</strong></div>
+                <div class="data-tile"><span>VADÁSZ SEBESSÉGE</span><strong id="r-hunter-speed">Nem elérhető</strong></div>
+            </div>
+            <p class="muted small" id="r-hunter-updated">A vadász GPS-e még nem aktív.</p>
+            <div class="runner-speed-line">A saját GPS-ed szerint: <strong id="r-own-speed">—</strong></div>
+        </section>
+
+        <section class="info-card">
+            <p class="eyebrow">JÁTÉKSZABÁLYOK</p>
+            <p id="r-instructions">Tartsd nyitva az oldalt és engedélyezd a helymeghatározást.</p>
+        </section>
+
+        <section class="messages-panel">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">JÁTÉKÜZENETEK</p>
+                    <h2>Fontos információk</h2>
+                </div>
+            </div>
+            <div id="r-announcement-card" class="announcement-card priority-important">
+                <span class="announcement-icon">!</span>
+                <p id="r-announcement">A játékhoz tartozó üzenetek itt jelennek meg.</p>
+            </div>
+        </section>
+    </main>
+    <script src="js/runner.js"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Vadász · Most Wanted</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body class="hunter-page">
+    <div id="hunter-toast" class="hunter-toast"></div>
+    <main id="login-view" class="app-shell narrow-shell">
+        <section class="auth-card hunter-auth">
+            <div class="brand-lockup"><span class="brand-mark">MW</span><span>MOST WANTED</span></div>
+            <p class="eyebrow">VADÁSZ IRÁNYÍTÓPULT</p>
+            <h1>Vezesd a hajszát.</h1>
+            <p class="muted">Élő térkép, GPS-státuszok, riasztások és játékvezérlés egy helyen.</p>
+            <label for="hunter-pin">Vadász PIN</label>
+            <input type="password" id="hunter-pin" placeholder="PIN kód" autocomplete="current-password">
+            <button class="primary-button" onclick="loginHunter()">BELÉPÉS A CONTROL ROOMBA</button>
+        </section>
+    </main>
+
+    <main id="hunter-layout" class="hunter-layout" style="display: none;">
+        <aside class="hunter-sidebar">
+            <header class="sidebar-header">
+                <div class="page-header compact">
+                    <div>
+                        <div class="brand-lockup"><span class="brand-mark">MW</span><span>CONTROL ROOM</span></div>
+                        <h1>Vadász irányítópult</h1>
+                    </div>
+                    <span class="live-pill">ÉLŐ</span>
+                </div>
+                <div class="hunter-stats">
+                    <div><strong id="stat-runners">0</strong><span>MENEKÜLŐ</span></div>
+                    <div><strong id="stat-active">0</strong><span>AKTÍV</span></div>
+                    <div><strong id="stat-wanted">—</strong><span>CÉLPONT</span></div>
+                    <div><strong id="stat-hunter-speed">—</strong><span>SAJÁT KM/H</span></div>
+                </div>
+                <div class="gps-status" id="hunter-gps-status">VADÁSZ GPS: KERESÉS...</div>
+            </header>
+
+            <section class="settings-panel">
+                <div class="section-heading compact-heading">
+                    <div><p class="eyebrow">JÁTÉKVEZÉRLÉS</p><h2>Beállítások</h2></div>
+                </div>
+                <div class="settings-grid">
+                    <label>Hivatalos jelzés (perc)<input type="number" id="set-interval" min="1" max="1440"></label>
+                    <label>Élő frissítés (mp)<input type="number" id="set-live-interval" min="1" max="10"></label>
+                    <label>Játék állapota<select id="set-status"><option value="waiting">Várakozás</option><option value="live">Élő</option><option value="paused">Szünetel</option><option value="finished">Lezárva</option></select></label>
+                    <label>Közlemény súlya<select id="set-priority"><option value="normal">Normál</option><option value="important">Fontos</option><option value="urgent">Azonnali</option></select></label>
+                    <label>Akcentusszín<input type="color" id="set-accent"></label>
+                </div>
+                <label>Játék címe<input type="text" id="set-title" maxlength="120"></label>
+                <label>Rövid leírás<textarea id="set-description" maxlength="500"></textarea></label>
+                <label>Játékosoknak szóló szabályok<textarea id="set-instructions" maxlength="1000"></textarea></label>
+                <label>Közlemény<textarea id="set-announcement" maxlength="500"></textarea></label>
+                <div class="toggle-grid">
+                    <label class="toggle"><input type="checkbox" id="set-distance"><span>Távolságok</span></label>
+                    <label class="toggle"><input type="checkbox" id="set-speed"><span>Sebességek</span></label>
+                    <label class="toggle"><input type="checkbox" id="set-alerts"><span>Feltűnő riasztások</span></label>
+                    <label class="toggle"><input type="checkbox" id="set-accuracy"><span>Pontos GPS</span></label>
+                    <label class="toggle"><input type="checkbox" id="set-penalty-enabled"><span>Büntetés mód</span></label>
+                </div>
+                <button class="primary-button" onclick="updateSettings()">BEÁLLÍTÁSOK MENTÉSE</button>
+            </section>
+
+            <section class="message-composer">
+                <p class="eyebrow">RIASZTÁS KÜLDÉSE</p>
+                <div class="composer-row">
+                    <select id="message-priority"><option value="normal">Normál</option><option value="important">Fontos</option><option value="urgent">Azonnali</option></select>
+                    <button class="primary-button" onclick="sendGlobalMsg()">KÜLDÉS</button>
+                </div>
+                <input type="text" id="global-msg" placeholder="Üzenet minden menekülőnek...">
+            </section>
+
+            <section class="runner-list" id="runner-list"></section>
+            <section class="event-log" id="event-log"></section>
+            <button class="danger-button" onclick="resetGame()">TELJES JÁTÉK RESET</button>
+        </aside>
+        <section class="map-container">
+            <div class="map-overlay">
+                <div><span class="eyebrow">ÉLŐ TÉRKÉP</span><strong>Menekülők helyzete</strong></div>
+                <span class="map-legend"><i class="legend-dot live"></i> Élő GPS <i class="legend-dot"></i> Hivatalos jel</span>
+            </div>
+            <div id="map"></div>
+        </section>
+    </main>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="js/hunter.js"></script>
+</body>
+</html>

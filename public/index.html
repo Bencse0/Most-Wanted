@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Most Wanted · A hajsza</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="manifest" href="manifest.json">
+</head>
+<body>
+    <main class="app-shell narrow-shell role-shell">
+        <section class="auth-card">
+            <div class="brand-lockup"><span class="brand-mark">MW</span><span>MOST WANTED</span></div>
+            <p class="eyebrow">ÉLŐ ÜLDÖZŐS JÁTÉK</p>
+            <h1>Válaszd ki a szereped.</h1>
+            <p class="muted">A menekülők és a vadászok külön irányítópulton követhetik a játékot.</p>
+            <div class="role-actions">
+                <a class="role-card primary-role" href="runner.html">
+                    <span class="role-index">01</span>
+                    <span><strong>Menekülő</strong><small>Csatlakozás és saját státusz</small></span>
+                    <b>→</b>
+                </a>
+                <a class="role-card" href="hunter.html">
+                    <span class="role-index">02</span>
+                    <span><strong>Vadász</strong><small>Élő térkép és játékvezérlés</small></span>
+                    <b>→</b>
+                </a>
+            </div>
+        </section>
+    </main>
+    <script>
+        if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+    </script>
+</body>
+</html>
