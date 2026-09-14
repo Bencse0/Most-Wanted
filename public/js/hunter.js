@@ -81,8 +81,7 @@ function updateStats(){const active=runnersData.filter(r=>!isLate(r)).length;con
 function isLate(r){return r.next_location_at&&Date.now()>new Date(r.next_location_at).getTime();}
 function isPenaltyActive(r){return r.penalty_until&&new Date(r.penalty_until).getTime()>Date.now();}
 function getMapCoordinates(r){
-  const penalty=isPenaltyActive(r);
-  if(penalty && Number.isFinite(Number(r.live_latitude)) && Number.isFinite(Number(r.live_longitude))) return {lat:Number(r.live_latitude),lng:Number(r.live_longitude),live:true};
+  // Runner position is ALWAYS the last official interval-based position on the hunter map.
   if(Number.isFinite(Number(r.last_latitude)) && Number.isFinite(Number(r.last_longitude))) return {lat:Number(r.last_latitude),lng:Number(r.last_longitude),live:false};
   return {lat:null,lng:null,live:false};
 }
@@ -90,7 +89,7 @@ function ensureMarker(r,coords){
   if(!Number.isFinite(coords.lat)||!Number.isFinite(coords.lng))return;
   if(!markers[r.id]) markers[r.id]=L.marker([coords.lat,coords.lng],{icon:runnerIcon(r.is_most_wanted,coords.live)}).addTo(map);
   else {markers[r.id].setLatLng([coords.lat,coords.lng]);markers[r.id].setIcon(runnerIcon(r.is_most_wanted,coords.live));}
-  markers[r.id].bindPopup(`<b>${escapeHtml(r.name)}</b><br>${coords.live?'Élő GPS':'Hivatalos jel'} · ${formatDateTime(coords.live?r.live_location_at:r.last_location_at)}`);
+  markers[r.id].bindPopup(`<b>${escapeHtml(r.name)}</b><br>Hivatalos jel · ${formatDateTime(r.last_location_at)}`);
 }
 function renderRunners(){
   if(penaltyMenuOpen)return;
@@ -111,10 +110,10 @@ function renderRunners(){
     const action=r.is_most_wanted?`<button class="small-button danger" onclick="setMostWanted(null)">CÉLPONT LEVÉTELE</button>`:`<button class="small-button" onclick="setMostWanted(${r.id})">MOST WANTED BEÁLLÍTÁSA</button>`;
     return `<article class="runner-card ${late?'late':'active'} ${r.is_most_wanted?'most-wanted':''}">
       <div class="runner-card-title"><strong>${escapeHtml(r.name)} ${badge}</strong><span class="runner-state ${late?'late':''}">${late?'KÉSÉS':'AKTÍV'}</span></div>
-      <div class="runner-live-line"><span class="${coords.live?'live-dot':'muted-dot'}"></span>${coords.live?'ÉLŐ GPS':'UTOLSÓ HIVATALOS JEL'} · ${coords.live?formatDateTime(r.live_location_at):last}</div>
+      <div class="runner-live-line"><span class="${r.is_most_wanted?'live-dot':'muted-dot'}"></span>${r.is_most_wanted?'ÉLŐ MÉRT ADAT':'UTOLSÓ HIVATALOS JEL'} · ${r.is_most_wanted && r.most_wanted_updated_at ? formatDateTime(r.most_wanted_updated_at) : last}</div>
       <div class="runner-card-grid">
         <span>Legutóbbi jel<b>${last}</b></span><span>Következő jel<b>${next}</b></span>
-        <span>Pontosság<b>${(r.live_accuracy||r.last_accuracy)?`${Math.round(r.live_accuracy||r.last_accuracy)} m`:'—'}</b></span>
+        <span>Pontosság<b>${r.last_accuracy?`${Math.round(r.last_accuracy)} m`:'—'}</b></span>
         <span>Távolság a vadásztól<b>${r.is_most_wanted?displayDistance:'—'}</b></span>
         <span>Sebesség<b>${displaySpeed}</b></span>
         <span>Állapot<b>${penalty?`Élő követés ${formatDateTime(r.penalty_until)}-ig`:'Büntetés nincs aktív'}</b></span>

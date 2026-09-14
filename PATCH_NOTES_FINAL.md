@@ -21,3 +21,12 @@
 A `DATABASE_URL` Render környezeti változóban maradjon a Supabase PostgreSQL connection stringje.
 
 A `game.db` nem szükséges a production működéshez.
+
+
+## Most Wanted metric-only live update
+
+- A Most Wanted játékos pozíciója továbbra is kizárólag a normál `location_interval` szerint kerül elküldésre.
+- A Most Wanted mód nem küld live GPS koordinátát, és a hunter térképén sem jelenik meg élő pozíció.
+- A játékos saját eszközén a GPS-ből számolt sebesség és a hunter aktuális helyzete alapján számolt légvonalbeli távolság kerül periodikusan elküldésre a `live_update_interval` szerint.
+- A hunter csak ezt a két származtatott értéket látja élőben, valamint az utolsó frissítés időpontját.
+- A korábbi `/api/runner/live-location` végpont Most Wanted módban nem fogad pozíciót; az új `/api/runner/live-metrics` végpont kizárólag derived metrics adatot fogad.

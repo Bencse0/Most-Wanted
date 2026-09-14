@@ -8,6 +8,7 @@ let lastLocationTime = null;
 let latestPosition = null;
 let locationInFlight = false;
 let liveInFlight = false;
+let lastLiveSentAt = 0;
 let retryAfter = 0;
 let timersStarted = false;
 let watchId = null;
@@ -56,7 +57,7 @@ async function loadDashboard() {
       timersStarted = true;
       setInterval(updateTimer, 1000);
       setInterval(pollRunnerUpdates, 1000);
-      setInterval(sendLiveLocation, 1000);
+      setInterval(sendLiveMetrics, 1000);
     }
     await pollRunnerUpdates();
     updateTimer();
@@ -84,7 +85,9 @@ function applySettings(nextSettings) {
 
 function applyRunner(nextRunner) {
   if (!nextRunner) return;
+  const wasMostWanted = runner?.is_most_wanted === true;
   runner = nextRunner;
+  if (!wasMostWanted && runner?.is_most_wanted === true) lastLiveSentAt = 0;
   lastLocationTime = runner.last_location_at ? new Date(runner.last_location_at).getTime() : null;
   nextLocationAt = runner.next_location_at ? new Date(runner.next_location_at).getTime() : null;
   document.getElementById('r-name').innerText = runner.name || 'MENEKÜLŐ';
@@ -96,7 +99,7 @@ function applyRunner(nextRunner) {
 }
 
 async function pollRunnerUpdates() {
-  if (!token || (document.hidden && !runner?.penalty_until)) return;
+  if (!token || (document.hidden && !isMostWantedActive())) return;
   try {
     const res = await fetch('/api/runner/updates', { headers: { Authorization: token }, cache: 'no-store' });
     const data = await safeJson(res);
@@ -115,13 +118,17 @@ async function pollRunnerUpdates() {
   } catch {}
 }
 
+function isMostWantedActive() {
+  return runner?.is_most_wanted === true;
+}
+
 function applyHunterStatus() {
   const distance = runner?.last_hunter_distance_km;
   const speed = runner?.last_hunter_speed;
   const at = runner?.last_hunter_location_at;
   document.getElementById('r-hunter-distance').innerText = settings.distance_enabled !== false && Number.isFinite(Number(distance)) ? `${Number(distance).toFixed(2)} km` : 'Nem elérhető';
   document.getElementById('r-hunter-speed').innerText = settings.speed_enabled !== false && Number.isFinite(Number(speed)) ? `${toKmh(speed).toFixed(1)} km/h` : 'Nem elérhető';
-  document.getElementById('r-hunter-updated').innerText = at ? `A te utolsó jelzésedkor: ${formatDateTime(at)}` : 'A vadász GPS-e még nem aktív.';
+  document.getElementById('r-hunter-updated').innerText = at ? `A vadász utolsó mért adata: ${formatDateTime(at)}` : 'A vadász GPS-e még nem aktív.';
 }
 
 function updateTimer() {
@@ -141,7 +148,8 @@ function updateTimer() {
   document.getElementById('r-status').innerText = 'IDŐZÍTETT';
   document.getElementById('r-status-detail').innerText = 'A hivatalos helyzetjelzés automatikusan indul a számláló lejártakor.';
   const activePenalty = runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
-  document.getElementById('r-live-pill').innerText = activePenalty ? 'ÉLŐ GPS' : 'ONLINE';
+  const wanted = runner?.is_most_wanted === true;
+  document.getElementById('r-live-pill').innerText = wanted ? 'MOST WANTED' : (activePenalty ? 'ÉLŐ GPS' : 'ONLINE');
   document.getElementById('r-live-pill').classList.toggle('warning', false);
 }
 
@@ -157,28 +165,40 @@ function startGeolocation() {
   }, { enableHighAccuracy: settings.high_accuracy_enabled !== false, timeout: 15000, maximumAge: 1000 });
 }
 
-async function sendLiveLocation() {
-  const activePenalty = runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
-  const isMostWanted = Boolean(runner?.is_most_wanted);
-  if (!token || (!activePenalty && !isMostWanted) || !latestPosition || liveInFlight) return;
+async function sendLiveMetrics() {
+  if (!token || !isMostWantedActive() || !latestPosition || liveInFlight) return;
+  const intervalMs = Math.max(1, Number(settings.live_update_interval) || 1) * 1000;
+  if (Date.now() - lastLiveSentAt < intervalMs) return;
+  if (!hunter || !Number.isFinite(Number(hunter.latitude)) || !Number.isFinite(Number(hunter.longitude))) return;
 
   liveInFlight = true;
   const { coords } = latestPosition;
+  const distanceKm = getDistanceInKm(coords.latitude, coords.longitude, Number(hunter.latitude), Number(hunter.longitude));
+  const speed = Number.isFinite(coords.speed) ? coords.speed : null;
   try {
-    const res = await fetch('/api/runner/live-location', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: token },
-      body: JSON.stringify({ 
-        latitude: coords.latitude, 
-        longitude: coords.longitude, 
-        accuracy: coords.accuracy, 
-        speed: coords.speed 
-      })
+    const res = await fetch('/api/runner/live-metrics', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', Authorization:token},
+      body:JSON.stringify({ distance_km: distanceKm, speed }),
+      cache:'no-store'
     });
-    if (res.status === 401) clearRunnerSession();
-  } catch {} finally { 
-    liveInFlight = false; 
-  }
+    if (res.status === 401) return clearRunnerSession();
+    if (res.ok) {
+      const data = await safeJson(res);
+      lastLiveSentAt = Date.now();
+      if (data.most_wanted_distance_km != null) {
+        runner.most_wanted_distance_km = data.most_wanted_distance_km;
+        runner.most_wanted_speed = data.most_wanted_speed;
+        runner.most_wanted_updated_at = data.most_wanted_updated_at;
+      }
+    }
+  } catch {} finally { liveInFlight = false; }
+}
+
+function getDistanceInKm(lat1,lon1,lat2,lon2){
+  const R=6371,toRad=v=>Number(v)*Math.PI/180,dLat=toRad(lat2-lat1),dLon=toRad(lon2-lon1);
+  const a=Math.sin(dLat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R*(2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)));
 }
 
 function sendTimedLocation() {
