@@ -42,6 +42,29 @@ const distanceInKm = (lat1, lon1, lat2, lon2) => {
 
 const getPriority = (value) => ['normal', 'important', 'urgent'].includes(value) ? value : 'normal';
 
+const normalizeCoordinate = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const normalizeSpeedMps = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= 100 ? number : null;
+};
+
+const computeSpeedMps = (previous, latitude, longitude, now, clientSpeed) => {
+  const directSpeed = normalizeSpeedMps(clientSpeed);
+  if (directSpeed !== null) return directSpeed;
+  if (!previous || previous.latitude === null || previous.longitude === null || !previous.location_at) return null;
+  const previousTime = new Date(previous.location_at).getTime();
+  const elapsedSeconds = (now.getTime() - previousTime) / 1000;
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 1) return null;
+  const km = distanceInKm(previous.latitude, previous.longitude, latitude, longitude);
+  if (!Number.isFinite(km)) return null;
+  const metersPerSecond = (km * 1000) / elapsedSeconds;
+  return Number.isFinite(metersPerSecond) && metersPerSecond <= 100 ? metersPerSecond : null;
+};
+
 async function ensureDatabaseSchema() {
   const statements = [
     `CREATE TABLE IF NOT EXISTS runners (
@@ -115,7 +138,10 @@ async function ensureDatabaseSchema() {
       accuracy DOUBLE PRECISION,
       speed DOUBLE PRECISION,
       location_at TIMESTAMPTZ,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      most_wanted_distance_km DOUBLE PRECISION,
+      most_wanted_speed DOUBLE PRECISION,
+      most_wanted_updated_at TIMESTAMPTZ
     )`,
     `ALTER TABLE runners ADD COLUMN IF NOT EXISTS tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
     `ALTER TABLE runners ADD COLUMN IF NOT EXISTS is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE`,
@@ -144,6 +170,9 @@ async function ensureDatabaseSchema() {
     `ALTER TABLE settings ADD COLUMN IF NOT EXISTS game_status TEXT NOT NULL DEFAULT 'waiting'`,
     `ALTER TABLE settings ADD COLUMN IF NOT EXISTS announcement_priority TEXT NOT NULL DEFAULT 'important'`,
     `ALTER TABLE settings ADD COLUMN IF NOT EXISTS accent_color TEXT NOT NULL DEFAULT '#9b87f5'`,
+    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_distance_km DOUBLE PRECISION`,
+    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_speed DOUBLE PRECISION`,
+    `ALTER TABLE hunter_presence ADD COLUMN IF NOT EXISTS most_wanted_updated_at TIMESTAMPTZ`,
     `INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
     `INSERT INTO hunter_presence (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
   ];
@@ -347,22 +376,27 @@ app.get('/api/runner/updates', checkRunner, handleAsync(async (req, res) => {
 }));
 
 app.post('/api/location', checkRunner, handleAsync(async (req, res) => {
-  const { latitude, longitude, accuracy, speed } = req.body;
-  if (![latitude, longitude].every((value) => Number.isFinite(Number(value)))) {
+  const latitude = normalizeCoordinate(req.body.latitude);
+  const longitude = normalizeCoordinate(req.body.longitude);
+  const accuracy = normalizeCoordinate(req.body.accuracy);
+  const speed = normalizeSpeedMps(req.body.speed);
+  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
     return res.status(400).json({ error: 'Érvénytelen helyadat' });
   }
 
-  const schedule = await db.query(`
+  const scheduleResult = await db.query(`
     SELECT r.last_location_at, r.location_cycle_started_at, r.created_at,
-           s.location_interval,
-           COALESCE(r.location_cycle_started_at, r.last_location_at, r.created_at)
-             + (s.location_interval * INTERVAL '1 minute') AS next_location_at
+           s.location_interval
     FROM runners r
     CROSS JOIN settings s
     WHERE r.id = $1 AND s.id = 1
   `, [req.runner.id]);
-  const nextLocationAt = new Date(schedule.rows[0].next_location_at);
-  if (req.runner.last_location_at && Date.now() < nextLocationAt.getTime()) {
+  const schedule = scheduleResult.rows[0];
+  if (!schedule) return res.status(404).json({ error: 'A menekülő nem található.' });
+
+  const baseTime = schedule.location_cycle_started_at || schedule.last_location_at || schedule.created_at;
+  const nextLocationAt = new Date(new Date(baseTime).getTime() + Number(schedule.location_interval) * 60000);
+  if (schedule.last_location_at && Date.now() < nextLocationAt.getTime()) {
     return res.status(429).json({
       error: 'A helyzetküldés még nem esedékes.',
       next_location_at: nextLocationAt.toISOString()
@@ -371,66 +405,135 @@ app.post('/api/location', checkRunner, handleAsync(async (req, res) => {
 
   const now = new Date();
   const hunterPresence = (await db.query(
-    'SELECT latitude, longitude, speed, location_at FROM hunter_presence WHERE id = 1'
+    'SELECT latitude, longitude, accuracy, speed, location_at, most_wanted_distance_km, most_wanted_speed, most_wanted_updated_at FROM hunter_presence WHERE id = 1'
   )).rows[0] || null;
-  const hunterDistance = hunterPresence
-    ? distanceInKm(latitude, longitude, hunterPresence.latitude, hunterPresence.longitude)
+
+  const hunterLat = normalizeCoordinate(hunterPresence?.latitude);
+  const hunterLng = normalizeCoordinate(hunterPresence?.longitude);
+  const hunterDistance = hunterLat !== null && hunterLng !== null
+    ? distanceInKm(latitude, longitude, hunterLat, hunterLng)
     : null;
-  await db.query(
-    `UPDATE runners
-     SET last_latitude = $1, last_longitude = $2, last_accuracy = $3,
-         last_speed = $4, last_location_at = $5, location_cycle_started_at = $5,
-         live_latitude = $1, live_longitude = $2, live_accuracy = $3,
-         live_speed = $4, live_location_at = $5,
-         last_hunter_distance_km = $6, last_hunter_speed = $7,
-         last_hunter_location_at = $8
-     WHERE id = $9`,
-    [
-      latitude, longitude, accuracy ?? null, finiteNumber(speed), now,
-      hunterDistance, hunterPresence ? finiteNumber(hunterPresence.speed) : null,
-      hunterPresence?.location_at || null, req.runner.id
-    ]
-  );
-  await db.query(
-    'INSERT INTO locations (runner_id, latitude, longitude, accuracy, speed) VALUES ($1, $2, $3, $4, $5)',
-    [req.runner.id, latitude, longitude, accuracy ?? null, finiteNumber(speed)]
-  );
-  await logEvent('LOCATION_UPDATE', req.runner.id, `${req.runner.name} új helyzetet küldött.`);
-  const next = new Date(now.getTime() + Number(schedule.rows[0].location_interval) * 60000);
+
+  const hunterSpeed = normalizeSpeedMps(hunterPresence?.speed);
+  const hunterLocationAt = hunterPresence?.location_at || null;
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE runners
+       SET last_latitude = $1,
+           last_longitude = $2,
+           last_accuracy = $3,
+           last_speed = $4,
+           last_location_at = $5,
+           location_cycle_started_at = $5,
+           live_latitude = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_latitude ELSE NULL END,
+           live_longitude = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_longitude ELSE NULL END,
+           live_accuracy = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_accuracy ELSE NULL END,
+           live_speed = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_speed ELSE NULL END,
+           live_location_at = CASE WHEN penalty_until IS NOT NULL AND penalty_until > $5 THEN live_location_at ELSE NULL END,
+           last_hunter_distance_km = $6,
+           last_hunter_speed = $7,
+           last_hunter_location_at = $8
+       WHERE id = $9`,
+      [latitude, longitude, accuracy, speed, now, hunterDistance, hunterSpeed, hunterLocationAt, req.runner.id]
+    );
+    await client.query(
+      `INSERT INTO locations (runner_id, latitude, longitude, accuracy, speed)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [req.runner.id, latitude, longitude, accuracy, speed]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('POST /api/location adatbázishiba:', error);
+    return res.status(500).json({ error: 'A helyzet mentése nem sikerült.' });
+  } finally {
+    client.release();
+  }
+
+  await logEvent('LOCATION_UPDATE', req.runner.id, `${req.runner.name} új hivatalos helyzetet küldött.`);
+  const next = new Date(now.getTime() + Number(schedule.location_interval) * 60000);
   res.json({
     success: true,
     last_location_at: now.toISOString(),
     next_location_at: next.toISOString(),
     hunter: hunterPresence ? {
-      ...hunterPresence,
-      distance_km: hunterDistance
+      latitude: hunterLat,
+      longitude: hunterLng,
+      accuracy: normalizeCoordinate(hunterPresence.accuracy),
+      speed: hunterSpeed,
+      location_at: hunterLocationAt,
+      distance_km: hunterDistance,
+      most_wanted_distance_km: normalizeCoordinate(hunterPresence.most_wanted_distance_km),
+      most_wanted_speed: normalizeSpeedMps(hunterPresence.most_wanted_speed),
+      most_wanted_updated_at: hunterPresence.most_wanted_updated_at || null
     } : null
   });
 }));
 
 app.post('/api/runner/live-location', checkRunner, handleAsync(async (req, res) => {
-  const { latitude, longitude, accuracy, speed } = req.body;
-  if (![latitude, longitude].every((value) => Number.isFinite(Number(value)))) {
+  const latitude = normalizeCoordinate(req.body.latitude);
+  const longitude = normalizeCoordinate(req.body.longitude);
+  const accuracy = normalizeCoordinate(req.body.accuracy);
+  const clientSpeed = normalizeSpeedMps(req.body.speed);
+  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
     return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
   }
 
-  const currentRunner = (await db.query(
-    'SELECT penalty_until FROM runners WHERE id = $1'
+  const current = (await db.query(
+    'SELECT penalty_until, live_latitude, live_longitude, live_location_at, live_speed FROM runners WHERE id = $1',
+    [req.runner.id]
   )).rows[0];
-  const penaltyActive = currentRunner?.penalty_until
-    && new Date(currentRunner.penalty_until).getTime() > Date.now();
+  if (!current) return res.status(404).json({ error: 'A menekülő nem található.' });
+
+  const penaltyUntil = current.penalty_until ? new Date(current.penalty_until) : null;
+  const penaltyActive = penaltyUntil && penaltyUntil.getTime() > Date.now();
   if (!penaltyActive) {
-    return res.status(403).json({ error: 'Élő helyzetküldés csak aktív büntetés alatt engedélyezett.' });
+    return res.status(403).json({
+      error: 'Élő helyzetküldés csak aktív büntetés alatt engedélyezett.'
+    });
   }
 
-  await db.query(
-    `UPDATE runners
-     SET live_latitude = $1, live_longitude = $2, live_accuracy = $3,
-         live_speed = $4, live_location_at = NOW()
-     WHERE id = $5`,
-    [latitude, longitude, accuracy ?? null, finiteNumber(speed), req.runner.id]
+  const now = new Date();
+  const measuredSpeed = computeSpeedMps(
+    {
+      latitude: current.live_latitude,
+      longitude: current.live_longitude,
+      location_at: current.live_location_at,
+    },
+    latitude,
+    longitude,
+    now,
+    clientSpeed
   );
-  res.json({ success: true });
+
+  try {
+    await db.query(
+      `UPDATE runners
+       SET live_latitude = $1,
+           live_longitude = $2,
+           live_accuracy = $3,
+           live_speed = $4,
+           live_location_at = $5
+       WHERE id = $6`,
+      [latitude, longitude, accuracy, measuredSpeed, now, req.runner.id]
+    );
+  } catch (error) {
+    console.error('POST /api/runner/live-location adatbázishiba:', error);
+    return res.status(500).json({ error: 'Az élő helyzet mentése nem sikerült.' });
+  }
+
+  res.json({
+    success: true,
+    latitude,
+    longitude,
+    accuracy,
+    speed: measuredSpeed,
+    penalty_until: penaltyUntil.toISOString(),
+    location_at: now.toISOString()
+  });
 }));
 
 // --- HUNTER API ---
@@ -548,8 +651,14 @@ app.post('/api/hunter/most-wanted', checkHunter, handleAsync(async (req, res) =>
       'UPDATE runners SET is_most_wanted = TRUE WHERE id = $1',
       [runnerId]
     );
+    await db.query(
+      'UPDATE hunter_presence SET most_wanted_distance_km = NULL, most_wanted_speed = NULL, most_wanted_updated_at = NULL WHERE id = 1'
+    );
     await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted!`);
   } else {
+    await db.query(
+      'UPDATE hunter_presence SET most_wanted_distance_km = NULL, most_wanted_speed = NULL, most_wanted_updated_at = NULL WHERE id = 1'
+    );
     await logEvent('MOST_WANTED_CLEARED', null, 'Most Wanted státusz törölve.');
   }
 
@@ -595,40 +704,79 @@ app.post('/api/hunter/penalty', checkHunter, handleAsync(async (req, res) => {
 }));
 
 app.post('/api/hunter/location', checkHunter, handleAsync(async (req, res) => {
-  const { latitude, longitude, accuracy, speed, timestamp } = req.body;
-  if (![latitude, longitude].every((value) => Number.isFinite(Number(value)))) {
+  const latitude = normalizeCoordinate(req.body.latitude);
+  const longitude = normalizeCoordinate(req.body.longitude);
+  const accuracy = normalizeCoordinate(req.body.accuracy);
+  const clientSpeed = normalizeSpeedMps(req.body.speed);
+  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
     return res.status(400).json({ error: 'Érvénytelen vadász helyadat' });
   }
 
   const previous = (await db.query(
     'SELECT latitude, longitude, location_at, speed FROM hunter_presence WHERE id = 1'
   )).rows[0] || null;
-
   const now = new Date();
-  const clientSpeed = finiteNumber(speed);
-  let measuredSpeed = clientSpeed !== null && clientSpeed >= 0 && clientSpeed <= 100
-    ? clientSpeed
-    : null;
+  const measuredSpeed = computeSpeedMps(previous, latitude, longitude, now, clientSpeed);
 
-  if (measuredSpeed === null && previous && Number.isFinite(Number(previous.latitude))
-      && Number.isFinite(Number(previous.longitude)) && previous.location_at) {
-    const elapsedSeconds = (now.getTime() - new Date(previous.location_at).getTime()) / 1000;
-    const distanceKm = distanceInKm(previous.latitude, previous.longitude, latitude, longitude);
-    const meters = Number.isFinite(distanceKm) ? distanceKm * 1000 : null;
-    if (elapsedSeconds > 0.5 && Number.isFinite(meters)) {
-      const derivedSpeed = meters / elapsedSeconds;
-      if (derivedSpeed >= 0 && derivedSpeed <= 100) measuredSpeed = derivedSpeed;
+  const currentSettings = (await db.query(
+    'SELECT location_interval FROM settings WHERE id = 1'
+  )).rows[0] || { location_interval: 20 };
+  const currentHunter = (await db.query(
+    'SELECT most_wanted_updated_at FROM hunter_presence WHERE id = 1'
+  )).rows[0] || null;
+  const intervalMs = Math.max(1, Number(currentSettings.location_interval) || 20) * 60 * 1000;
+  const lastMwMetricAt = currentHunter?.most_wanted_updated_at
+    ? new Date(currentHunter.most_wanted_updated_at).getTime()
+    : 0;
+  const shouldUpdateMostWanted = !lastMwMetricAt || now.getTime() - lastMwMetricAt >= intervalMs;
+
+  let mwDistance = null;
+  if (shouldUpdateMostWanted) {
+    const wanted = (await db.query(`
+      SELECT id,
+             CASE
+               WHEN penalty_until IS NOT NULL AND penalty_until > NOW() THEN live_latitude
+               ELSE last_latitude
+             END AS target_latitude,
+             CASE
+               WHEN penalty_until IS NOT NULL AND penalty_until > NOW() THEN live_longitude
+               ELSE last_longitude
+             END AS target_longitude
+      FROM runners
+      WHERE is_most_wanted = TRUE
+      LIMIT 1
+    `)).rows[0];
+    if (wanted) {
+      const targetLat = normalizeCoordinate(wanted.target_latitude);
+      const targetLng = normalizeCoordinate(wanted.target_longitude);
+      if (targetLat !== null && targetLng !== null) {
+        mwDistance = distanceInKm(latitude, longitude, targetLat, targetLng);
+      }
     }
   }
 
   await db.query(
     `UPDATE hunter_presence
-     SET latitude = $1, longitude = $2, accuracy = $3, speed = $4,
-         location_at = $5, updated_at = NOW()
+     SET latitude = $1,
+         longitude = $2,
+         accuracy = $3,
+         speed = $4,
+         location_at = $5,
+         updated_at = NOW(),
+         most_wanted_distance_km = CASE WHEN $6 THEN $7 ELSE most_wanted_distance_km END,
+         most_wanted_speed = CASE WHEN $6 THEN $4 ELSE most_wanted_speed END,
+         most_wanted_updated_at = CASE WHEN $6 THEN $5 ELSE most_wanted_updated_at END
      WHERE id = 1`,
-    [latitude, longitude, accuracy ?? null, measuredSpeed, now]
+    [latitude, longitude, accuracy, measuredSpeed, now, shouldUpdateMostWanted, mwDistance]
   );
-  res.json({ success: true, speed: measuredSpeed, location_at: now.toISOString() });
+
+  res.json({
+    success: true,
+    speed: measuredSpeed,
+    location_at: now.toISOString(),
+    most_wanted_distance_km: shouldUpdateMostWanted ? mwDistance : null,
+    most_wanted_updated_at: shouldUpdateMostWanted ? now.toISOString() : null
+  });
 }));
 
 app.post('/api/hunter/message', checkHunter, handleAsync(async (req, res) => {

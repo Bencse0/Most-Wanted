@@ -60,7 +60,7 @@ async function loadDashboard() {
         timersStarted = true;
         setInterval(updateTimer, 1000);
         setInterval(pollRunnerUpdates, 1000);
-        setInterval(sendLiveLocation, 1000);
+        setInterval(sendLiveLocation, 3000);
     }
 
     pollRunnerUpdates();
@@ -209,24 +209,43 @@ function startGeolocation() {
 }
 
 async function sendLiveLocation() {
-    if (!token || !runner?.live_tracking_required || !latestPosition || liveInFlight) return;
+    if (!token || !runner?.live_tracking_required || liveInFlight || !navigator.geolocation) return;
     liveInFlight = true;
-    const { coords } = latestPosition;
-    try {
-        const res = await fetch('/api/runner/live-location', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: token },
-            body: JSON.stringify({
-                latitude: coords.latitude,
-                longitude: coords.longitude,
-                accuracy: coords.accuracy,
-                speed: coords.speed
-            })
-        });
-        if (res.status === 401) clearRunnerSession();
-    } finally {
-        liveInFlight = false;
-    }
+    const finish = () => { liveInFlight = false; };
+    navigator.geolocation.getCurrentPosition(async (position) => {
+        latestPosition = position;
+        const { coords } = position;
+        try {
+            const res = await fetch('/api/runner/live-location', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: token },
+                body: JSON.stringify({
+                    latitude: coords.latitude,
+                    longitude: coords.longitude,
+                    accuracy: coords.accuracy,
+                    speed: coords.speed
+                })
+            });
+            if (res.status === 401) return clearRunnerSession();
+            if (res.status === 403) {
+                await pollRunnerUpdates();
+                return;
+            }
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                showAlert(data.error || 'Az élő helyzetküldés nem sikerült.', 'urgent');
+                return;
+            }
+        } finally {
+            finish();
+        }
+    }, () => {
+        finish();
+    }, {
+        enableHighAccuracy: settings.high_accuracy_enabled !== false,
+        timeout: 15000,
+        maximumAge: 1000
+    });
 }
 
 function sendTimedLocation() {

@@ -153,41 +153,15 @@ function getMapCoordinates(runner) {
             : { lat: null, lng: null, live: false };
 }
 
-function shouldRefreshMostWantedMetrics(runner) {
-    if (!runner?.is_most_wanted || !hunterPresence) return false;
-    const intervalMs = Math.max(1, Number(settings.location_interval) || 20) * 60 * 1000;
-    return mostWantedMetrics.runnerId !== runner.id || !mostWantedMetrics.updatedAt
-        || Date.now() - mostWantedMetrics.updatedAt >= intervalMs;
-}
-
-function refreshMostWantedMetrics(runner) {
-    if (!runner?.is_most_wanted || !hunterPresence) return;
-    if (!shouldRefreshMostWantedMetrics(runner)) return;
-
-    const target = getMapCoordinates(runner);
-    const hunterLat = Number(hunterPresence.latitude);
-    const hunterLng = Number(hunterPresence.longitude);
-    let distanceKm = null;
-    if (Number.isFinite(target.lat) && Number.isFinite(target.lng)
-        && Number.isFinite(hunterLat) && Number.isFinite(hunterLng)) {
-        distanceKm = getDistanceInKm(target.lat, target.lng, hunterLat, hunterLng);
-    }
-
-    mostWantedMetrics.runnerId = runner.id;
-    mostWantedMetrics.distanceKm = Number.isFinite(distanceKm) ? distanceKm : null;
-    mostWantedMetrics.speedMps = Number.isFinite(Number(hunterPresence.speed))
-        ? Number(hunterPresence.speed)
-        : null;
-    mostWantedMetrics.updatedAt = Date.now();
-}
-
 function getHunterMetricsForRunner(runner) {
     if (runner?.is_most_wanted) {
-        refreshMostWantedMetrics(runner);
         return {
-            distanceKm: mostWantedMetrics.distanceKm,
-            speedMps: mostWantedMetrics.speedMps,
-            updatedAt: mostWantedMetrics.updatedAt
+            distanceKm: Number.isFinite(Number(hunterPresence?.most_wanted_distance_km))
+                ? Number(hunterPresence.most_wanted_distance_km) : null,
+            speedMps: Number.isFinite(Number(hunterPresence?.most_wanted_speed))
+                ? Number(hunterPresence.most_wanted_speed) : null,
+            updatedAt: hunterPresence?.most_wanted_updated_at
+                ? new Date(hunterPresence.most_wanted_updated_at).getTime() : 0
         };
     }
 
@@ -219,14 +193,6 @@ function renderRunners() {
     if (!runnersData.length) {
         list.innerHTML = '<div class="empty-state"><strong>Még nincs menekülő</strong><span>A csatlakozó játékosok itt jelennek meg.</span></div>';
         return;
-    }
-
-    const currentMostWantedId = runnersData.find((runner) => runner.is_most_wanted)?.id ?? null;
-    if (mostWantedMetrics.runnerId !== currentMostWantedId) {
-        mostWantedMetrics.runnerId = currentMostWantedId;
-        mostWantedMetrics.distanceKm = null;
-        mostWantedMetrics.speedMps = null;
-        mostWantedMetrics.updatedAt = 0;
     }
 
     runnersData.forEach((runner) => {
@@ -299,29 +265,53 @@ function renderRunners() {
 }
 
 function rememberPenaltySelection(runnerId, value) {
-    penaltySelections[runnerId] = value;
-    releasePenaltyMenuSoon();
+    penaltySelections[runnerId] = String(value);
+    penaltyMenuInteracting = true;
+    clearTimeout(penaltyMenuResumeTimer);
+    penaltyMenuResumeTimer = setTimeout(() => {
+        penaltyMenuInteracting = false;
+    }, 2500);
 }
 
-function releasePenaltyMenuSoon() {
+function beginPenaltyMenuInteraction() {
+    penaltyMenuInteracting = true;
+    clearTimeout(penaltyMenuResumeTimer);
+}
+
+function endPenaltyMenuInteractionSoon() {
     clearTimeout(penaltyMenuResumeTimer);
     penaltyMenuResumeTimer = setTimeout(() => {
         penaltyMenuInteracting = false;
         fetchState();
-    }, 800);
+    }, 1200);
 }
 
 document.addEventListener('pointerdown', (event) => {
-    if (event.target instanceof HTMLSelectElement && event.target.classList.contains('penalty-select')) {
-        penaltyMenuInteracting = true;
-        clearTimeout(penaltyMenuResumeTimer);
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (select?.classList.contains('penalty-select')) beginPenaltyMenuInteraction();
+});
+
+document.addEventListener('touchstart', (event) => {
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (select?.classList.contains('penalty-select')) beginPenaltyMenuInteraction();
+}, { passive: true });
+
+document.addEventListener('mousedown', (event) => {
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (select?.classList.contains('penalty-select')) beginPenaltyMenuInteraction();
+});
+
+document.addEventListener('change', (event) => {
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (select?.classList.contains('penalty-select')) {
+        endPenaltyMenuInteractionSoon();
     }
 });
 
-document.addEventListener('focusin', (event) => {
-    if (event.target instanceof HTMLSelectElement && event.target.classList.contains('penalty-select')) {
-        penaltyMenuInteracting = true;
-        clearTimeout(penaltyMenuResumeTimer);
+document.addEventListener('focusout', (event) => {
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (select?.classList.contains('penalty-select')) {
+        endPenaltyMenuInteractionSoon();
     }
 });
 
@@ -353,10 +343,10 @@ async function setPenalty(runnerId) {
         body: JSON.stringify({ runner_id: runnerId, minutes })
     });
     if (!res.ok) return showHunterToast('A büntetés aktiválása nem sikerült.', 'urgent');
-    delete penaltySelections[runnerId];
     document.activeElement?.blur();
     showHunterToast(minutes ? `A folyamatos láthatóság ${minutes} percre aktív.` : 'A büntetés törölve.', 'normal');
     await fetchState();
+    delete penaltySelections[runnerId];
 }
 
 async function updateSettings() {
