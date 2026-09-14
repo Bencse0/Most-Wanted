@@ -15,10 +15,6 @@ let lastAnnouncement = '';
 let lastAnnouncementPriority = '';
 const shownMessageIds = new Set();
 
-let pollTimer = null;
-let liveTimer = null;
-let currentLiveIntervalMs = null;
-
 if (token) {
   sessionStorage.setItem('runnerToken', token);
   localStorage.removeItem('runnerToken');
@@ -32,36 +28,17 @@ async function safeJson(res) {
   try { return await res.json(); } catch { return {}; }
 }
 
-function resetLiveTimers() {
-  const seconds = Number(settings.live_update_interval) || 1;
-  const ms = Math.max(seconds, 1) * 1000;
-  if (currentLiveIntervalMs === ms && pollTimer && liveTimer) return;
-  currentLiveIntervalMs = ms;
-
-  if (pollTimer) clearInterval(pollTimer);
-  if (liveTimer) clearInterval(liveTimer);
-
-  pollTimer = setInterval(pollRunnerUpdates, ms);
-  liveTimer = setInterval(sendLiveLocation, ms);
-}
-
 async function joinGame() {
   const gameCode = document.getElementById('game-code').value.trim();
   const name = document.getElementById('runner-name').value.trim();
   try {
-    const res = await fetch('/api/auth/runner', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gameCode, name })
-    });
+    const res = await fetch('/api/auth/runner', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ gameCode, name }) });
     const data = await safeJson(res);
     if (!res.ok || !data.token) return showAlert(data.error || 'Nem sikerült csatlakozni.', 'urgent');
     sessionStorage.setItem('runnerToken', data.token);
     token = data.token;
     await loadDashboard();
-  } catch {
-    showAlert('Nem sikerült kapcsolódni a szerverhez.', 'urgent');
-  }
+  } catch { showAlert('Nem sikerült kapcsolódni a szerverhez.', 'urgent'); }
 }
 
 async function loadDashboard() {
@@ -78,14 +55,13 @@ async function loadDashboard() {
     if (!timersStarted) {
       timersStarted = true;
       setInterval(updateTimer, 1000);
-      resetLiveTimers();
+      setInterval(pollRunnerUpdates, 1000);
+      setInterval(sendLiveLocation, 1000);
     }
     await pollRunnerUpdates();
     updateTimer();
     if (!data.runner.last_location_at) sendTimedLocation();
-  } catch {
-    showAlert('A szerver nem érhető el.', 'urgent');
-  }
+  } catch { showAlert('A szerver nem érhető el.', 'urgent'); }
 }
 
 function applySettings(nextSettings) {
@@ -101,15 +77,9 @@ function applySettings(nextSettings) {
   document.getElementById('r-game-status').innerText = statusLabel(settings.game_status);
   const priority = settings.announcement_priority || 'normal';
   document.getElementById('r-announcement-card').className = `announcement-card priority-${priority}`;
-  if (lastAnnouncement && settings.alerts_enabled && (lastAnnouncement !== settings.announcement || lastAnnouncementPriority !== priority)) {
-    showAlert(settings.announcement, priority);
-  }
+  if (lastAnnouncement && settings.alerts_enabled && (lastAnnouncement !== settings.announcement || lastAnnouncementPriority !== priority)) showAlert(settings.announcement, priority);
   lastAnnouncement = settings.announcement || '';
   lastAnnouncementPriority = priority;
-
-  if (timersStarted) {
-    resetLiveTimers();
-  }
 }
 
 function applyRunner(nextRunner) {
@@ -138,10 +108,7 @@ async function pollRunnerUpdates() {
     hunter = data.hunter;
     applyHunterStatus();
     (data.messages || []).slice().reverse().forEach((message) => {
-      if (!shownMessageIds.has(message.id)) {
-        shownMessageIds.add(message.id);
-        showAlert(message.message, message.priority || 'important');
-      }
+      if (!shownMessageIds.has(message.id)) { shownMessageIds.add(message.id); showAlert(message.message, message.priority || 'important'); }
     });
     updateTimer();
     if (beforePenalty && !runner?.penalty_until) document.getElementById('r-live-pill').innerText = 'ONLINE';
@@ -196,11 +163,7 @@ async function sendLiveLocation() {
   liveInFlight = true;
   const { coords } = latestPosition;
   try {
-    const res = await fetch('/api/runner/live-location', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: token },
-      body: JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy, speed: coords.speed })
-    });
+    const res = await fetch('/api/runner/live-location', { method:'POST', headers:{'Content-Type':'application/json', Authorization:token}, body:JSON.stringify({ latitude:coords.latitude, longitude:coords.longitude, accuracy:coords.accuracy, speed:coords.speed }) });
     if (res.status === 401) clearRunnerSession();
   } catch {} finally { liveInFlight = false; }
 }
@@ -211,12 +174,7 @@ function sendTimedLocation() {
   const send = async (position) => {
     try {
       const { coords } = position;
-      const res = await fetch('/api/location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: token },
-        body: JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy, speed: coords.speed }),
-        cache: 'no-store'
-      });
+      const res = await fetch('/api/location', { method:'POST', headers:{'Content-Type':'application/json', Authorization:token}, body:JSON.stringify({ latitude:coords.latitude, longitude:coords.longitude, accuracy:coords.accuracy, speed:coords.speed }), cache:'no-store' });
       const data = await safeJson(res);
       if (res.status === 401) return clearRunnerSession();
       if (res.status === 429) { nextLocationAt = new Date(data.next_location_at).getTime(); return; }
@@ -247,21 +205,21 @@ function locationFailed(message) {
   showAlert(message, 'urgent');
 }
 
-function showAlert(message, priority = 'important') {
+function showAlert(message, priority='important') {
   const box = document.getElementById('alert-banner');
   document.getElementById('alert-title').innerText = priority === 'urgent' ? 'AZONNALI FIGYELEM' : priority === 'important' ? 'FONTOS KÖZLEMÉNY' : 'JÁTÉKÜZENET';
   document.getElementById('alert-body').innerText = message;
   box.className = `alert-banner visible priority-${priority}`;
   clearTimeout(showAlert.timer);
   showAlert.timer = setTimeout(() => box.classList.remove('visible'), priority === 'urgent' ? 12000 : 7000);
-  if (priority !== 'normal' && navigator.vibrate) navigator.vibrate([120, 80, 120]);
+  if (priority !== 'normal' && navigator.vibrate) navigator.vibrate([120,80,120]);
 }
 
 function clearRunnerSession() {
   if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
   sessionStorage.removeItem('runnerToken'); localStorage.removeItem('runnerToken'); token = null; location.reload();
 }
-async function leaveGame() { if (!confirm('Kilépsz ebből a játékból?')) return; await fetch('/api/runner/leave', { method: 'POST', headers: { Authorization: token } }).catch(() => {}); clearRunnerSession(); }
-function statusLabel(status) { return ({ waiting: 'VÁRAKOZÁS', live: 'JÁTÉK ÉLŐ', paused: 'SZÜNETEL', finished: 'LEZÁRVA' })[status] || 'JÁTÉK ÉLŐ'; }
+async function leaveGame() { if (!confirm('Kilépsz ebből a játékból?')) return; await fetch('/api/runner/leave',{method:'POST',headers:{Authorization:token}}).catch(()=>{}); clearRunnerSession(); }
+function statusLabel(status) { return ({waiting:'VÁRAKOZÁS',live:'JÁTÉK ÉLŐ',paused:'SZÜNETEL',finished:'LEZÁRVA'})[status] || 'JÁTÉK ÉLŐ'; }
 function toKmh(mps) { return Number(mps) * 3.6; }
-function formatDateTime(value) { if (!value) return '--:--'; const d = new Date(value); return Number.isNaN(d.getTime()) ? '--:--' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function formatDateTime(value) { if (!value) return '--:--'; const d = new Date(value); return Number.isNaN(d.getTime()) ? '--:--' : d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
