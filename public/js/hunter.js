@@ -12,6 +12,7 @@ let lastPostedHunterPositionTimestamp = 0;
 let penaltyMenuInteracting = false;
 let penaltyMenuResumeTimer = null;
 const penaltySelections = {};
+const mostWantedMetrics = { runnerId: null, distanceKm: null, speedMps: null, updatedAt: 0 };
 
 async function loginHunter() {
     const pin = document.getElementById('hunter-pin').value;
@@ -152,6 +153,53 @@ function getMapCoordinates(runner) {
             : { lat: null, lng: null, live: false };
 }
 
+function shouldRefreshMostWantedMetrics(runner) {
+    if (!runner?.is_most_wanted || !hunterPresence) return false;
+    const intervalMs = Math.max(1, Number(settings.location_interval) || 20) * 60 * 1000;
+    return mostWantedMetrics.runnerId !== runner.id || !mostWantedMetrics.updatedAt
+        || Date.now() - mostWantedMetrics.updatedAt >= intervalMs;
+}
+
+function refreshMostWantedMetrics(runner) {
+    if (!runner?.is_most_wanted || !hunterPresence) return;
+    if (!shouldRefreshMostWantedMetrics(runner)) return;
+
+    const target = getMapCoordinates(runner);
+    const hunterLat = Number(hunterPresence.latitude);
+    const hunterLng = Number(hunterPresence.longitude);
+    let distanceKm = null;
+    if (Number.isFinite(target.lat) && Number.isFinite(target.lng)
+        && Number.isFinite(hunterLat) && Number.isFinite(hunterLng)) {
+        distanceKm = getDistanceInKm(target.lat, target.lng, hunterLat, hunterLng);
+    }
+
+    mostWantedMetrics.runnerId = runner.id;
+    mostWantedMetrics.distanceKm = Number.isFinite(distanceKm) ? distanceKm : null;
+    mostWantedMetrics.speedMps = Number.isFinite(Number(hunterPresence.speed))
+        ? Number(hunterPresence.speed)
+        : null;
+    mostWantedMetrics.updatedAt = Date.now();
+}
+
+function getHunterMetricsForRunner(runner) {
+    if (runner?.is_most_wanted) {
+        refreshMostWantedMetrics(runner);
+        return {
+            distanceKm: mostWantedMetrics.distanceKm,
+            speedMps: mostWantedMetrics.speedMps,
+            updatedAt: mostWantedMetrics.updatedAt
+        };
+    }
+
+    return {
+        distanceKm: Number.isFinite(Number(runner?.last_hunter_distance_km))
+            ? Number(runner.last_hunter_distance_km) : null,
+        speedMps: Number.isFinite(Number(runner?.last_hunter_speed))
+            ? Number(runner.last_hunter_speed) : null,
+        updatedAt: runner?.last_hunter_location_at ? new Date(runner.last_hunter_location_at).getTime() : 0
+    };
+}
+
 function renderRunners() {
     if (penaltyMenuInteracting) return;
     const list = document.getElementById('runner-list');
@@ -173,6 +221,14 @@ function renderRunners() {
         return;
     }
 
+    const currentMostWantedId = runnersData.find((runner) => runner.is_most_wanted)?.id ?? null;
+    if (mostWantedMetrics.runnerId !== currentMostWantedId) {
+        mostWantedMetrics.runnerId = currentMostWantedId;
+        mostWantedMetrics.distanceKm = null;
+        mostWantedMetrics.speedMps = null;
+        mostWantedMetrics.updatedAt = 0;
+    }
+
     runnersData.forEach((runner) => {
         const late = isLate(runner);
         const coords = getMapCoordinates(runner);
@@ -180,7 +236,8 @@ function renderRunners() {
         const lastTime = runner.last_location_at ? formatDateTime(runner.last_location_at) : 'Még nem küldött';
         const nextTime = runner.next_location_at ? formatDateTime(runner.next_location_at) : '--:--';
         const liveTime = runner.live_location_at ? formatDateTime(runner.live_location_at) : '—';
-        const snapshotDistance = Number(runner.last_hunter_distance_km);
+        const hunterMetrics = getHunterMetricsForRunner(runner);
+        const snapshotDistance = hunterMetrics.distanceKm;
         const distanceStr = settings.distance_enabled !== false && Number.isFinite(snapshotDistance)
             ? `${snapshotDistance.toFixed(2)} km`
             : '—';
@@ -199,7 +256,7 @@ function renderRunners() {
         }
 
         const penaltyActive = isPenaltyActive(runner);
-        const snapshotSpeed = Number(runner.last_hunter_speed);
+        const snapshotSpeed = hunterMetrics.speedMps;
         const speed = Number.isFinite(snapshotSpeed) ? `${toKmh(snapshotSpeed).toFixed(1)} km/h` : '—';
         const cardClass = `runner-card ${late ? 'late' : 'active'} ${runner.is_most_wanted ? 'most-wanted' : ''}`;
         const mwBadge = runner.is_most_wanted ? '<span class="mw-badge">MOST WANTED</span>' : '';
