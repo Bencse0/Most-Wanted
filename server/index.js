@@ -270,14 +270,51 @@ app.post('/api/runner/live-location', requireRunner, handleAsync(async (req, res
   const latitude = Number(req.body.latitude);
   const longitude = Number(req.body.longitude);
   const accuracy = finiteNumber(req.body.accuracy);
-  const speed = finiteNumber(req.body.speed);
-  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
-  const fresh = (await db.query('SELECT penalty_until FROM runners WHERE id = $1', [req.runner.id])).rows[0];
-  if (!liveTrackingActive(fresh)) return res.status(409).json({ error: 'Nincs aktív folyamatos láthatósági büntetés.' });
-  await db.query(`UPDATE runners SET live_latitude = $1, live_longitude = $2, live_accuracy = $3, live_speed = $4, live_location_at = NOW() WHERE id = $5`, [latitude, longitude, accuracy, speed, req.runner.id]);
+  let speed = finiteNumber(req.body.speed);
+
+  if (!validCoordinate(latitude, -90, 90) || !validCoordinate(longitude, -180, 180)) {
+    return res.status(400).json({ error: 'Érvénytelen élő helyadat' });
+  }
   
-  await updateMostWantedMetrics();
+  const fresh = (await db.query('SELECT is_most_wanted, penalty_until FROM runners WHERE id = $1', [req.runner.id])).rows[0];
   
+  const activePenalty = fresh?.penalty_until && new Date(fresh.penalty_until).getTime() > Date.now();
+  const isMostWanted = fresh?.is_most_wanted;
+
+  if (!activePenalty && !isMostWanted) {
+    return res.status(409).json({ error: 'Nincs aktív büntetés vagy Most Wanted státusz.' });
+  }
+
+  let dist = null;
+  if (isMostWanted) {
+    const hunterResult = await db.query('SELECT latitude, longitude FROM hunter_presence WHERE id = 1');
+    const hunter = hunterResult.rows[0];
+    if (hunter && validCoordinate(hunter.latitude, -90, 90) && validCoordinate(hunter.longitude, -180, 180)) {
+      dist = distanceInKm(latitude, longitude, hunter.latitude, hunter.longitude);
+    }
+  }
+
+  if (activePenalty) {
+    await db.query(
+      `UPDATE runners 
+       SET live_latitude = $1, live_longitude = $2, live_accuracy = $3, live_speed = $4, live_location_at = NOW(),
+           most_wanted_distance_km = COALESCE($5, most_wanted_distance_km),
+           most_wanted_speed = COALESCE($4, most_wanted_speed),
+           most_wanted_updated_at = CASE WHEN $5 IS NOT NULL THEN NOW() ELSE most_wanted_updated_at END
+       WHERE id = $6`,
+      [latitude, longitude, accuracy, speed, dist, req.runner.id]
+    );
+  } else if (isMostWanted) {
+    await db.query(
+      `UPDATE runners 
+       SET most_wanted_distance_km = $1, 
+           most_wanted_speed = $2, 
+           most_wanted_updated_at = NOW() 
+       WHERE id = $3`,
+      [dist, speed, req.runner.id]
+    );
+  }
+
   res.json({ success: true, live: true });
 }));
 
