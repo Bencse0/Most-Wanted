@@ -159,13 +159,26 @@ function startGeolocation() {
 
 async function sendLiveLocation() {
   const activePenalty = runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
-  if (!token || !activePenalty || !latestPosition || liveInFlight) return;
+  const isMostWanted = Boolean(runner?.is_most_wanted);
+  if (!token || (!activePenalty && !isMostWanted) || !latestPosition || liveInFlight) return;
+
   liveInFlight = true;
   const { coords } = latestPosition;
   try {
-    const res = await fetch('/api/runner/live-location', { method:'POST', headers:{'Content-Type':'application/json', Authorization:token}, body:JSON.stringify({ latitude:coords.latitude, longitude:coords.longitude, accuracy:coords.accuracy, speed:coords.speed }) });
+    const res = await fetch('/api/runner/live-location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: token },
+      body: JSON.stringify({ 
+        latitude: coords.latitude, 
+        longitude: coords.longitude, 
+        accuracy: coords.accuracy, 
+        speed: coords.speed 
+      })
+    });
     if (res.status === 401) clearRunnerSession();
-  } catch {} finally { liveInFlight = false; }
+  } catch {} finally { 
+    liveInFlight = false; 
+  }
 }
 
 function sendTimedLocation() {
