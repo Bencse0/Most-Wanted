@@ -475,3 +475,26 @@ body.runner-most-wanted .messages-panel::after {
   .alert-mark { width:2.9rem; height:2.9rem; }
   .alert-copy p { font-size:.97rem; }
 }
+
+
+/* ===== v13 MOST WANTED CONTROL + PERFORMANCE PASS ===== */
+.mw-control { margin: 1rem var(--space); padding: 1rem; border:1px solid rgba(255,106,0,.28); border-radius:16px; background:linear-gradient(135deg,rgba(255,90,0,.08),rgba(15,16,20,.72)); }
+.mw-control-head { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:.65rem; }
+.mw-control-head h2 { margin:0; }
+.mw-control-state { display:inline-flex; align-items:center; padding:.35rem .6rem; border-radius:999px; font-size:.6rem; font-weight:900; letter-spacing:.1em; border:1px solid var(--line); }
+.mw-control-state.ready { color:#62e6ab; background:rgba(85,214,154,.1); }
+.mw-control-state.active { color:#ffd17d; background:rgba(255,106,0,.14); border-color:rgba(255,106,0,.48); }
+.mw-control-state.cooldown { color:#ffb1b9; background:rgba(255,97,116,.1); border-color:rgba(255,97,116,.34); }
+.mw-control-help { margin-top:.55rem; color:var(--muted); font-size:.72rem; }
+.runner-actions .small-button:disabled { opacity:.42; cursor:not-allowed; transform:none !important; filter:none !important; }
+html, body.runner-page { width:100%; max-width:100%; overflow-x:hidden; overscroll-behavior-x:none; }
+body.runner-page { min-height:100dvh; }
+body.runner-most-wanted::before, body.runner-most-wanted::after { pointer-events:none; }
+body.runner-most-wanted .game-hero::before { animation:none; opacity:.55; }
+body.runner-most-wanted .messages-panel::before { animation:none; opacity:.75; }
+@media (prefers-reduced-motion: reduce) { body.runner-most-wanted *, .alert-card, .hunter-toast { animation:none !important; transition:none !important; } }
+@media (max-width:560px) {
+  body.runner-most-wanted .app-shell { width:100%; padding-left:.7rem; padding-right:.7rem; }
+  body.runner-most-wanted .game-hero, body.runner-most-wanted .runner-status-card, body.runner-most-wanted .timer-panel, body.runner-most-wanted .proximity-panel, body.runner-most-wanted .info-card, body.runner-most-wanted .messages-panel { box-shadow:0 10px 28px rgba(0,0,0,.34); }
+  body.runner-most-wanted::after { opacity:.12; }
+}

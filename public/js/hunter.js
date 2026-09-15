@@ -57,7 +57,7 @@ async function fetchState(){
     settings=data.settings||{}; runnersData=data.runners||[]; hunterPresence=data.hunter||null;
     document.documentElement.style.setProperty('--accent',settings.accent_color||'#9b87f5');
     if(!settingsLoaded){fillSettings(settings);settingsLoaded=true;}
-    updateStats(); renderRunners(); renderEventLog(data.events||[]);
+    updateStats(); renderRunners(); renderMostWantedControl(); renderEventLog(data.events||[]);
   }finally{stateRequestInFlight=false;}
 }
 async function startStateLoop(){ if(stateLoopStarted)return; stateLoopStarted=true; while(stateLoopStarted){ const seconds=Math.max(1,Number(settings.live_update_interval)||1); await new Promise(r=>setTimeout(r,seconds*1000)); await fetchState(); } }
@@ -65,6 +65,7 @@ async function startStateLoop(){ if(stateLoopStarted)return; stateLoopStarted=tr
 function fillSettings(s){
   document.getElementById('set-interval').value=s.location_interval||20;
   document.getElementById('set-live-interval').value=s.live_update_interval||1;
+  document.getElementById('set-mw-mode').value=s.most_wanted_mode||'1m';
   document.getElementById('set-title').value=s.game_title||'';
   document.getElementById('set-description').value=s.game_description||'';
   document.getElementById('set-instructions').value=s.runner_instructions||'';
@@ -112,7 +113,7 @@ function renderRunners(){
     const displaySpeed = r.is_most_wanted && settings.speed_enabled!==false && Number.isFinite(Number(r.most_wanted_speed)) ? `${toKmh(r.most_wanted_speed).toFixed(1)} km/h` : (r.is_most_wanted?'—':'Rejtett');
     const badge=r.is_most_wanted?'<span class="mw-badge">MOST WANTED</span>':'';
     const selected=String(penaltySelections[r.id]||0);
-    const action=r.is_most_wanted?`<button class="small-button danger" onclick="setMostWanted(null)">CÉLPONT LEVÉTELE</button>`:`<button class="small-button" onclick="setMostWanted(${r.id})">MOST WANTED BEÁLLÍTÁSA</button>`;
+    const mwLocked = !!getMostWantedLock(); const action=r.is_most_wanted?`<button class="small-button danger" onclick="setMostWanted(null)">CÉLPONT LEVÉTELE</button>`:`<button class="small-button" ${mwLocked?'disabled':''} onclick="setMostWanted(${r.id})">MOST WANTED BEÁLLÍTÁSA</button>`;
     return `<article class="runner-card ${late?'late':'active'} ${r.is_most_wanted?'most-wanted':''}">
       <div class="runner-card-title"><strong>${escapeHtml(r.name)} ${badge}</strong><span class="runner-state ${late?'late':''}">${late?'KÉSÉS':'AKTÍV'}</span></div>
       <div class="runner-live-line"><span class="${r.is_most_wanted?'live-dot':'muted-dot'}"></span>${r.is_most_wanted?'ÉLŐ MÉRT ADAT':'UTOLSÓ HIVATALOS JEL'} · ${r.is_most_wanted && r.most_wanted_updated_at ? formatDateTime(r.most_wanted_updated_at) : last}</div>
@@ -133,9 +134,33 @@ function renderRunners(){
   });
 }
 function runnerIcon(isWanted,live){return L.divIcon({className:'runner-pin-wrap',html:`<span class="runner-pin ${isWanted?'wanted':''} ${live?'live':''}"></span>`,iconSize:[24,24],iconAnchor:[12,12],popupAnchor:[0,-12]});}
-async function setMostWanted(id){const res=await fetch('/api/hunter/most-wanted',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runner_id:id})});if(!res.ok)return showHunterToast('A Most Wanted beállítása nem sikerült.','urgent');await fetchState();}
+function getMostWantedLock(){
+  const activeUntil = settings.most_wanted_active_until ? new Date(settings.most_wanted_active_until).getTime() : 0;
+  const cooldownUntil = settings.most_wanted_cooldown_until ? new Date(settings.most_wanted_cooldown_until).getTime() : 0;
+  if (activeUntil > Date.now()) return {type:'active', until:activeUntil};
+  if (cooldownUntil > Date.now()) return {type:'cooldown', until:cooldownUntil};
+  return null;
+}
+function formatRemainingMs(ms){const total=Math.max(0,Math.ceil(ms/1000));const m=Math.floor(total/60);const s=total%60;return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
+function renderMostWantedControl(){
+  const state=document.getElementById('most-wanted-control-state'), help=document.getElementById('most-wanted-control-help'), select=document.getElementById('set-mw-mode');
+  if(!state||!help)return;
+  const lock=getMostWantedLock();
+  const target=runnersData.find(r=>r.is_most_wanted);
+  if(select) select.disabled=!!lock;
+  if(lock?.type==='active') { state.className='mw-control-state active'; state.innerText='AKTÍV'; help.innerText=`${target?target.name:'Célpont'} · hátra ${formatRemainingMs(lock.until-Date.now())}`; }
+  else if(lock?.type==='cooldown') { state.className='mw-control-state cooldown'; state.innerText='COOLDOWN'; help.innerText=`Új Most Wanted ${formatRemainingMs(lock.until-Date.now())} múlva.`; }
+  else { state.className='mw-control-state ready'; state.innerText='KÉSZ'; help.innerText='Válaszd ki a taktikát, majd jelölj ki egyetlen célpontot.'; }
+}
+async function setMostWanted(id){
+  const mode=document.getElementById('set-mw-mode')?.value||'1m';
+  const res=await fetch('/api/hunter/most-wanted',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runner_id:id,mode})});
+  const d=await safeJson(res);
+  if(!res.ok)return showHunterToast(d.error||'A Most Wanted beállítása nem sikerült.','urgent');
+  await fetchState();
+}
 async function setPenalty(runnerId){const select=document.getElementById(`penalty-${runnerId}`);if(!select)return;const minutes=Number(select.value);penaltySelections[runnerId]=String(minutes);const res=await fetch('/api/hunter/penalty',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runner_id:runnerId,minutes})});if(!res.ok){const d=await safeJson(res);return showHunterToast(d.error||'A büntetés aktiválása nem sikerült.','urgent');}penaltyMenuOpen=false;showHunterToast(minutes?`A folyamatos láthatóság ${minutes} percre aktív.`:'A büntetés törölve.','normal');await fetchState();}
-async function updateSettings(){const res=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location_interval:Number(document.getElementById('set-interval').value),live_update_interval:Number(document.getElementById('set-live-interval').value),game_title:document.getElementById('set-title').value,game_description:document.getElementById('set-description').value,runner_instructions:document.getElementById('set-instructions').value,announcement:document.getElementById('set-announcement').value,announcement_priority:document.getElementById('set-priority').value,game_status:document.getElementById('set-status').value,distance_enabled:document.getElementById('set-distance').checked,speed_enabled:document.getElementById('set-speed').checked,alerts_enabled:document.getElementById('set-alerts').checked,high_accuracy_enabled:document.getElementById('set-accuracy').checked,penalty_enabled:document.getElementById('set-penalty-enabled').checked,accent_color:document.getElementById('set-accent').value})});if(!res.ok)return showHunterToast('A beállítások mentése nem sikerült.','urgent');settingsLoaded=false;await fetchState();showHunterToast('A beállítások mentve.','normal');}
+async function updateSettings(){const res=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location_interval:Number(document.getElementById('set-interval').value),live_update_interval:Number(document.getElementById('set-live-interval').value),game_title:document.getElementById('set-title').value,game_description:document.getElementById('set-description').value,runner_instructions:document.getElementById('set-instructions').value,announcement:document.getElementById('set-announcement').value,announcement_priority:document.getElementById('set-priority').value,game_status:document.getElementById('set-status').value,distance_enabled:document.getElementById('set-distance').checked,speed_enabled:document.getElementById('set-speed').checked,alerts_enabled:document.getElementById('set-alerts').checked,high_accuracy_enabled:document.getElementById('set-accuracy').checked,penalty_enabled:document.getElementById('set-penalty-enabled').checked,accent_color:document.getElementById('set-accent').value,most_wanted_mode:document.getElementById('set-mw-mode').value})});if(!res.ok)return showHunterToast('A beállítások mentése nem sikerült.','urgent');settingsLoaded=false;await fetchState();showHunterToast('A beállítások mentve.','normal');}
 async function sendGlobalMsg(){const input=document.getElementById('global-msg'),message=input.value.trim();if(!message)return;const res=await fetch('/api/hunter/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,priority:document.getElementById('message-priority').value})});if(res.ok){input.value='';showHunterToast('Üzenet elküldve minden menekülőnek.','normal');await fetchState();}}
 async function resetGame(){if(!confirm('Biztosan teljesen újraindítod a játékot?'))return;if(!confirm('Ez a művelet nem vonható vissza. Folytatod?'))return;const res=await fetch('/api/hunter/reset',{method:'POST'});if(res.ok){settingsLoaded=false;await fetchState();showHunterToast('A játék teljesen újraindult.','normal');}}
 function renderEventLog(events){document.getElementById('event-log').innerHTML=events.map(e=>`<div><time>${formatDateTime(e.created_at)}</time> ${escapeHtml(e.data)}</div>`).join('');}

@@ -75,6 +75,12 @@
                 <input type="text" id="global-msg" placeholder="Üzenet minden menekülőnek...">
             </section>
 
+            <section class="mw-control">
+                <div class="mw-control-head"><div><p class="eyebrow">CÉLPONT PROTOKOLL</p><h2>Most Wanted mód</h2></div><span id="most-wanted-control-state" class="mw-control-state ready">KÉSZ</span></div>
+                <select id="set-mw-mode" aria-label="Most Wanted időtartam"><option value="1m">1 perc aktív · 90 mp újrahasználati várakozás</option><option value="2m">2 perc aktív · 150 mp újrahasználati várakozás</option></select>
+                <div id="most-wanted-control-help" class="mw-control-help">Válaszd ki a taktikát, majd jelölj ki egyetlen célpontot.</div>
+            </section>
+
             <section class="runner-list" id="runner-list"></section>
             <section class="event-log" id="event-log"></section>
             <button class="danger-button" onclick="resetGame()">TELJES JÁTÉK RESET</button>
