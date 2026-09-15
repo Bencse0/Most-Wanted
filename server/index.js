@@ -258,8 +258,9 @@ app.post('/api/runner/live-metrics', requireRunner, handleAsync(async (req, res)
     return res.status(400).json({ error: 'Érvénytelen élő GPS-adat' });
   }
 
-  const fresh = (await db.query('SELECT is_most_wanted FROM runners WHERE id = $1', [req.runner.id])).rows[0];
-  if (!fresh?.is_most_wanted) return res.status(409).json({ error: 'A játékos nem Most Wanted.' });
+  const fresh = (await db.query('SELECT is_most_wanted, penalty_until FROM runners WHERE id = $1', [req.runner.id])).rows[0];
+  const penaltyActive = !!(fresh?.penalty_until && new Date(fresh.penalty_until).getTime() > Date.now());
+  if (!fresh?.is_most_wanted && !penaltyActive) return res.status(409).json({ error: 'Nincs aktív élő követés.' });
 
   const hunter = (await db.query('SELECT latitude, longitude FROM hunter_presence WHERE id = 1')).rows[0] || null;
   if (!hunter || !validCoordinate(hunter.latitude, -90, 90) || !validCoordinate(hunter.longitude, -180, 180)) {
@@ -272,18 +273,32 @@ app.post('/api/runner/live-metrics', requireRunner, handleAsync(async (req, res)
   }
 
   const now = new Date();
-  await db.query(
-    `UPDATE runners
-     SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = $3
-     WHERE id = $4`,
-    [distanceKm, speed, now, req.runner.id]
-  );
+  if (penaltyActive) {
+    // During an active penalty the hunter is allowed to see the runner's
+    // position continuously. This is separate from Most Wanted metrics.
+    await db.query(
+      `UPDATE runners
+       SET live_latitude = $1, live_longitude = $2, live_accuracy = $3,
+           live_speed = $4, live_location_at = $5
+       WHERE id = $6`,
+      [latitude, longitude, finiteNumber(req.body.accuracy), speed, now, req.runner.id]
+    );
+  }
+  if (fresh?.is_most_wanted) {
+    await db.query(
+      `UPDATE runners
+       SET most_wanted_distance_km = $1, most_wanted_speed = $2, most_wanted_updated_at = $3
+       WHERE id = $4`,
+      [distanceKm, speed, now, req.runner.id]
+    );
+  }
 
   res.json({
     success: true,
-    most_wanted_distance_km: distanceKm,
-    most_wanted_speed: speed,
-    most_wanted_updated_at: now.toISOString()
+    most_wanted_distance_km: fresh?.is_most_wanted ? distanceKm : null,
+    most_wanted_speed: fresh?.is_most_wanted ? speed : null,
+    most_wanted_updated_at: fresh?.is_most_wanted ? now.toISOString() : null,
+    live_location: penaltyActive
   });
 }));
 

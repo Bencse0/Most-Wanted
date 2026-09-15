@@ -121,6 +121,9 @@ async function pollRunnerUpdates() {
 function isMostWantedActive() {
   return runner?.is_most_wanted === true;
 }
+function isPenaltyActive() {
+  return !!(runner?.penalty_until && new Date(runner.penalty_until).getTime() > Date.now());
+}
 
 function applyHunterStatus() {
   const distance = runner?.last_hunter_distance_km;
@@ -166,7 +169,7 @@ function startGeolocation() {
 }
 
 async function sendLiveMetrics() {
-  if (!token || !isMostWantedActive() || !latestPosition || liveInFlight) return;
+  if (!token || (!isMostWantedActive() && !isPenaltyActive()) || !latestPosition || liveInFlight) return;
   const intervalMs = Math.max(1, Number(settings.live_update_interval) || 1) * 1000;
   if (Date.now() - lastLiveSentAt < intervalMs) return;
 
@@ -180,7 +183,7 @@ async function sendLiveMetrics() {
     const res = await fetch('/api/runner/live-metrics', {
       method:'POST',
       headers:{'Content-Type':'application/json', Authorization:token},
-      body:JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, speed }),
+      body:JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy, speed }),
       cache:'no-store'
     });
     if (res.status === 401) return clearRunnerSession();

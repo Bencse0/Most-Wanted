@@ -81,7 +81,11 @@ function updateStats(){const active=runnersData.filter(r=>!isLate(r)).length;con
 function isLate(r){return r.next_location_at&&Date.now()>new Date(r.next_location_at).getTime();}
 function isPenaltyActive(r){return r.penalty_until&&new Date(r.penalty_until).getTime()>Date.now();}
 function getMapCoordinates(r){
-  // Runner position is ALWAYS the last official interval-based position on the hunter map.
+  // Active penalty grants continuous position visibility. Most Wanted alone
+  // never moves the map marker; it only exposes live speed/distance metrics.
+  if(isPenaltyActive(r) && Number.isFinite(Number(r.live_latitude)) && Number.isFinite(Number(r.live_longitude))) {
+    return {lat:Number(r.live_latitude),lng:Number(r.live_longitude),live:true};
+  }
   if(Number.isFinite(Number(r.last_latitude)) && Number.isFinite(Number(r.last_longitude))) return {lat:Number(r.last_latitude),lng:Number(r.last_longitude),live:false};
   return {lat:null,lng:null,live:false};
 }
@@ -89,7 +93,7 @@ function ensureMarker(r,coords){
   if(!Number.isFinite(coords.lat)||!Number.isFinite(coords.lng))return;
   if(!markers[r.id]) markers[r.id]=L.marker([coords.lat,coords.lng],{icon:runnerIcon(r.is_most_wanted,coords.live)}).addTo(map);
   else {markers[r.id].setLatLng([coords.lat,coords.lng]);markers[r.id].setIcon(runnerIcon(r.is_most_wanted,coords.live));}
-  markers[r.id].bindPopup(`<b>${escapeHtml(r.name)}</b><br>Hivatalos jel · ${formatDateTime(r.last_location_at)}`);
+  markers[r.id].bindPopup(`<b>${escapeHtml(r.name)}</b><br>${coords.live ? `Élő GPS · ${formatDateTime(r.live_location_at)}` : `Hivatalos jel · ${formatDateTime(r.last_location_at)}`}`);
 }
 function renderRunners(){
   if(penaltyMenuOpen)return;
