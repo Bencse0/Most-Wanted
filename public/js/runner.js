@@ -267,33 +267,60 @@ function ensureAudioContext() {
     return audioContext;
   } catch { return null; }
 }
-function ensureAudioContext() {
-  if (audioContext) return audioContext;
-  try { audioContext = new (window.AudioContext || window.webkitAudioContext)(); } catch { return null; }
-  return audioContext;
+
+let notificationAudioUnlocked = false;
+let notificationAudio = null;
+let notificationUrgentAudio = null;
+
+function unlockNotificationAudio() {
+  try {
+    if (!notificationAudio) {
+      notificationAudio = new Audio('/audio/notification.wav');
+      notificationAudio.preload = 'auto';
+      notificationAudio.volume = 0.92;
+    }
+    if (!notificationUrgentAudio) {
+      notificationUrgentAudio = new Audio('/audio/notification-urgent.wav');
+      notificationUrgentAudio.preload = 'auto';
+      notificationUrgentAudio.volume = 0.98;
+    }
+    // A muted play primes the media element without annoying the user.
+    const el = notificationAudio;
+    el.muted = true;
+    const promise = el.play();
+    if (promise && promise.then) promise.then(() => { el.pause(); el.currentTime = 0; el.muted = false; notificationAudioUnlocked = true; }).catch(() => { el.muted = false; });
+  } catch {}
 }
+
 function playAlertTone(priority='important', kind='message') {
-  const ctx = ensureAudioContext();
-  if (!ctx) return;
-  if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
-  const now = ctx.currentTime + 0.02;
   const urgent = priority === 'urgent' || kind === 'most-wanted';
-  const tones = urgent ? [660, 880, 1046.5, 880] : [523.25, 659.25, 783.99];
-  tones.forEach((freq, i) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const t = now + i * (urgent ? 0.12 : 0.15);
-    osc.type = i === 0 ? 'triangle' : 'sine';
-    osc.frequency.setValueAtTime(freq, t);
-    osc.frequency.exponentialRampToValueAtTime(freq * (urgent ? 0.92 : 0.98), t + 0.1);
-    gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(urgent ? 0.13 : 0.09, t + 0.018);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + (urgent ? 0.1 : 0.13));
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(t);
-    osc.stop(t + (urgent ? 0.12 : 0.15));
-  });
+  try {
+    const el = urgent ? notificationUrgentAudio : notificationAudio;
+    if (!el) { unlockNotificationAudio(); return; }
+    el.pause();
+    el.currentTime = 0;
+    el.volume = urgent ? 0.98 : 0.92;
+    const promise = el.play();
+    if (promise && promise.catch) promise.catch(() => {
+      // Fallback for browsers that reject HTMLAudio until AudioContext is resumed.
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime + 0.01;
+      const freqs = urgent ? [392, 523.25, 659.25, 783.99, 1046.5] : [523.25, 659.25, 783.99];
+      freqs.forEach((freq, i) => {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        const t = now + i * (urgent ? 0.13 : 0.16);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(urgent ? 0.07 : 0.045, t + 0.018);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + (urgent ? 0.105 : 0.13));
+        osc.connect(gain).connect(ctx.destination); osc.start(t); osc.stop(t + 0.14);
+      });
+    });
+  } catch {}
 }
+
 function requestNotificationPermission() {
   try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {}); } catch {}
 }
@@ -353,7 +380,9 @@ function removeAlert(article) {
   article.classList.add('removing');
   setTimeout(() => article.remove(), 300);
 }
-document.addEventListener('pointerdown', () => { ensureAudioContext(); requestNotificationPermission(); }, { once: true });
+document.addEventListener('pointerdown', () => { ensureAudioContext(); unlockNotificationAudio(); requestNotificationPermission(); }, { once: true });
+window.addEventListener('touchstart', unlockNotificationAudio, { once: true, passive: true });
+window.addEventListener('keydown', unlockNotificationAudio, { once: true });
 function clearRunnerSession() {
   if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
   sessionStorage.removeItem('runnerToken'); localStorage.removeItem('runnerToken'); token = null; location.reload();

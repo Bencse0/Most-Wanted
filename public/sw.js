@@ -1,4 +1,4 @@
-const CACHE_NAME = 'most-wanted-v11-premium-ui';
+const CACHE_NAME = 'most-wanted-v12-ultra';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -7,7 +7,7 @@ const STATIC_ASSETS = [
   '/manifest.json',
   '/css/style.css',
   '/js/runner.js',
-  '/js/hunter.js'
+  '/js/hunter.js', '/audio/notification.wav', '/audio/notification-urgent.wav'
 ];
 
 self.addEventListener('install', (event) => {
