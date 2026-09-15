@@ -374,7 +374,7 @@ app.post('/api/settings', requireHunter, handleAsync(async (req, res) => {
 
 app.post('/api/hunter/reset', requireHunter, handleAsync(async (req, res) => {
   await db.query('TRUNCATE locations, messages, events, runners RESTART IDENTITY CASCADE');
-  await db.query(`UPDATE settings SET location_interval=20, live_update_interval=1, distance_enabled=TRUE, speed_enabled=TRUE, alerts_enabled=TRUE, high_accuracy_enabled=TRUE, penalty_enabled=TRUE, game_status='waiting', announcement_priority='important', accent_color='#9b87f5', game_title='Most Wanted - A hajsza', game_description='A vadászok követik a menekülőket.', runner_instructions='Tartsd nyitva az oldalt és engedélyezd a helymeghatározást.', announcement='A játékhoz tartozó üzenetek itt jelennek meg.', updated_at=NOW() WHERE id=1`);
+  await db.query(`UPDATE settings SET location_interval=20, live_update_interval=1, distance_enabled=TRUE, speed_enabled=TRUE, alerts_enabled=TRUE, high_accuracy_enabled=TRUE, penalty_enabled=TRUE, game_status='waiting', announcement_priority='important', accent_color='#9b87f5', game_title='Most Wanted - A hajsza', game_description='A vadászok követik a menekülőket.', runner_instructions='Tartsd nyitva az oldalt és engedélyezd a helymeghatározást.', announcement='A játékhoz tartozó üzenetek itt jelennek meg.', most_wanted_mode='1m', most_wanted_active_runner_id=NULL, most_wanted_active_until=NULL, most_wanted_cooldown_until=NULL, updated_at=NOW() WHERE id=1`);
   await db.query('UPDATE hunter_presence SET latitude=NULL, longitude=NULL, accuracy=NULL, speed=NULL, location_at=NULL, updated_at=NOW() WHERE id=1');
   hunterPrevious = null;
   lastMostWantedMeasureAt = 0;

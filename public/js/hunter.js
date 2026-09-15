@@ -12,6 +12,15 @@ const penaltySelections = {};
 let penaltyMenuOpen = false;
 let stateLoopStarted = false;
 
+function updateHunterClock(){
+  const el=document.getElementById('hunter-clock');
+  if(!el)return;
+  const now=new Date();
+  el.textContent=now.toLocaleTimeString('hu-HU',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+}
+setInterval(updateHunterClock,250);
+updateHunterClock();
+
 async function safeJson(res) { try { return await res.json(); } catch { return {}; } }
 
 async function loginHunter() {

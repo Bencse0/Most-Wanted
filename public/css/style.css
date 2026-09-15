@@ -108,6 +108,17 @@ input[type="color"] { height: 2.65rem; padding: .25rem; }
 .ghost-button { width: auto; padding: .58rem .78rem; background: transparent; border: 1px solid var(--line); color: var(--muted); }
 .danger-button { width: calc(100% - 2 * var(--space)); margin: 0 var(--space) var(--space); padding: .75rem; background: rgba(255,97,116,.16); color: #ffadba; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: var(--space); }
+
+.header-tools { display: flex; align-items: center; gap: .55rem; }
+.clock-chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 6.7em; padding: .42rem .65rem;
+    border: 1px solid rgba(255,255,255,.12); border-radius: 999px;
+    background: rgba(5,8,13,.72); color: var(--text);
+    font-variant-numeric: tabular-nums; letter-spacing: .08em;
+    font-size: .72rem; font-weight: 850;
+    box-shadow: inset 0 0 18px rgba(255,255,255,.03);
+}
 .page-header.compact { align-items: center; margin: 0; }
 .page-header.compact h1 { margin: .35rem 0 0; font-size: 1.2rem; }
 .game-hero { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: var(--space); margin-bottom: var(--space); }
@@ -497,4 +508,9 @@ body.runner-most-wanted .messages-panel::before { animation:none; opacity:.75; }
   body.runner-most-wanted .app-shell { width:100%; padding-left:.7rem; padding-right:.7rem; }
   body.runner-most-wanted .game-hero, body.runner-most-wanted .runner-status-card, body.runner-most-wanted .timer-panel, body.runner-most-wanted .proximity-panel, body.runner-most-wanted .info-card, body.runner-most-wanted .messages-panel { box-shadow:0 10px 28px rgba(0,0,0,.34); }
   body.runner-most-wanted::after { opacity:.12; }
+}
+
+@media (max-width: 640px){
+  .header-tools{gap:.4rem; flex-wrap:wrap; justify-content:flex-end;}
+  .clock-chip{font-size:.67rem; min-width:6.35em; padding:.38rem .55rem;}
 }

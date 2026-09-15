@@ -19,6 +19,15 @@ let lastAnnouncement = '';
 let lastAnnouncementPriority = '';
 const shownMessageIds = new Set();
 
+function updateRunnerClock(){
+  const el=document.getElementById('runner-clock');
+  if(!el)return;
+  const now=new Date();
+  el.textContent=now.toLocaleTimeString('hu-HU',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+}
+setInterval(updateRunnerClock,250);
+updateRunnerClock();
+
 if (token) {
   sessionStorage.setItem('runnerToken', token);
   localStorage.removeItem('runnerToken');
