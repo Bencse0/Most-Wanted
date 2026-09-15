@@ -41,6 +41,21 @@ async function logEvent(type, runnerId, data) {
   return result.rows[0];
 }
 
+async function ensureMostWantedCompatibility() {
+  // Production databases may have been created by an older build. Keep this
+  // migration idempotent so the Most Wanted endpoint can recover even when
+  // the deployment was upgraded without recreating the database.
+  await db.query("ALTER TABLE runners ADD COLUMN IF NOT EXISTS is_most_wanted BOOLEAN NOT NULL DEFAULT FALSE");
+  await db.query("ALTER TABLE runners ADD COLUMN IF NOT EXISTS most_wanted_distance_km DOUBLE PRECISION");
+  await db.query("ALTER TABLE runners ADD COLUMN IF NOT EXISTS most_wanted_speed DOUBLE PRECISION");
+  await db.query("ALTER TABLE runners ADD COLUMN IF NOT EXISTS most_wanted_updated_at TIMESTAMPTZ");
+  await db.query("ALTER TABLE runners ADD COLUMN IF NOT EXISTS most_wanted_until TIMESTAMPTZ");
+  await db.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS most_wanted_mode TEXT NOT NULL DEFAULT '1m'");
+  await db.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS most_wanted_active_runner_id BIGINT");
+  await db.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS most_wanted_active_until TIMESTAMPTZ");
+  await db.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS most_wanted_cooldown_until TIMESTAMPTZ");
+}
+
 async function getSettings() {
   return (await db.query('SELECT * FROM settings WHERE id = 1')).rows[0];
 }
@@ -367,6 +382,7 @@ app.post('/api/hunter/reset', requireHunter, handleAsync(async (req, res) => {
 }));
 
 app.post('/api/hunter/most-wanted', requireHunter, handleAsync(async (req, res) => {
+  await ensureMostWantedCompatibility();
   await expireMostWantedIfNeeded();
   const runnerId = req.body.runner_id ? Number(req.body.runner_id) : null;
   const current = (await db.query('SELECT * FROM settings WHERE id=1')).rows[0];
@@ -461,6 +477,7 @@ app.use((err, req, res, next) => {
 const PORT = Number(process.env.PORT || 3000);
 (async () => {
   await ensureSchema();
+  await ensureMostWantedCompatibility();
   server.listen(PORT, '0.0.0.0', () => console.log(`Szerver fut a ${PORT} porton`));
 })().catch((error) => {
   console.error('INDULÁSI HIBA', error?.stack || error);

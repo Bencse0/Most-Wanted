@@ -104,7 +104,8 @@ async function ensureSchema() {
   await db.query(`INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
   await db.query(`INSERT INTO hunter_presence (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
   await db.query(`UPDATE runners SET tracking_enabled = COALESCE(tracking_enabled, TRUE), is_most_wanted = COALESCE(is_most_wanted, FALSE)`);
-  await db.query(`UPDATE settings SET location_interval = COALESCE(location_interval, 20), live_update_interval = COALESCE(live_update_interval, 1), distance_enabled = COALESCE(distance_enabled, TRUE), speed_enabled = COALESCE(speed_enabled, TRUE), alerts_enabled = COALESCE(alerts_enabled, TRUE), high_accuracy_enabled = COALESCE(high_accuracy_enabled, TRUE), penalty_enabled = COALESCE(penalty_enabled, TRUE), game_status = COALESCE(game_status, 'waiting'), announcement_priority = COALESCE(announcement_priority, 'important'), accent_color = COALESCE(accent_color, '#9b87f5'), updated_at = COALESCE(updated_at, NOW()) WHERE id = 1`);
+  await db.query(`UPDATE settings SET location_interval = COALESCE(location_interval, 20), live_update_interval = COALESCE(live_update_interval, 1), distance_enabled = COALESCE(distance_enabled, TRUE), speed_enabled = COALESCE(speed_enabled, TRUE), alerts_enabled = COALESCE(alerts_enabled, TRUE), high_accuracy_enabled = COALESCE(high_accuracy_enabled, TRUE), penalty_enabled = COALESCE(penalty_enabled, TRUE), game_status = COALESCE(game_status, 'waiting'), announcement_priority = COALESCE(announcement_priority, 'important'), accent_color = COALESCE(accent_color, '#9b87f5'), most_wanted_mode = COALESCE(most_wanted_mode, '1m'), updated_at = COALESCE(updated_at, NOW()) WHERE id = 1`);
+  await db.query(`UPDATE runners SET is_most_wanted = COALESCE(is_most_wanted, FALSE)`);
 }
 
 module.exports = { ensureSchema };
