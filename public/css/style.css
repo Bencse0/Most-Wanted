@@ -237,3 +237,15 @@ input[type="color"] { height: 2.65rem; padding: .25rem; }
     .data-grid.three .data-tile:last-child { grid-column: auto; }
     .runner-actions { grid-template-columns: 1fr; }
 }
+
+/* Most Wanted: orange / red / black alert theme */
+body.runner-most-wanted { --accent:#ff7a18; --accent-strong:#ff9f43; background: radial-gradient(circle at 50% 0%, rgba(255,80,0,.16), transparent 42%), #080808; }
+body.runner-most-wanted .runner-status-card, body.runner-most-wanted .timer-panel, body.runner-most-wanted .proximity-panel, body.runner-most-wanted .info-card, body.runner-most-wanted .messages-panel, body.runner-most-wanted .game-hero { border-color:rgba(255,90,20,.42); box-shadow:0 0 0 1px rgba(255,70,0,.06),0 18px 45px rgba(0,0,0,.35); }
+body.runner-most-wanted .status-chip, body.runner-most-wanted .live-pill { background:linear-gradient(135deg,#ff6a00,#d61f00); color:#fff; border-color:#ff7a18; }
+body.runner-most-wanted .accent-tile { background:linear-gradient(145deg,rgba(255,90,20,.18),rgba(80,0,0,.14)); }
+body.runner-most-wanted .messages-panel { border-left:4px solid #ff5a1f; }
+.alert-banner.most-wanted { border-color:#ff6a00; box-shadow:0 0 0 2px rgba(255,106,0,.18),0 18px 55px rgba(255,55,0,.28); }
+.alert-banner.priority-urgent { animation:mwAlertPulse 1s ease-in-out 3; }
+@keyframes mwAlertPulse { 0%,100%{transform:translateY(0) scale(1)} 50%{transform:translateY(0) scale(1.025)} }
+.hunter-toast.priority-important { border-color:rgba(247,198,109,.75); box-shadow:0 0 0 2px rgba(247,198,109,.12),0 12px 35px rgba(0,0,0,.35); }
+.hunter-toast.priority-urgent { border-color:rgba(255,97,116,.9); box-shadow:0 0 0 2px rgba(255,97,116,.16),0 12px 40px rgba(255,55,0,.16); animation:mwAlertPulse 1s ease-in-out 2; }

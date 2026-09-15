@@ -351,6 +351,7 @@ app.post('/api/hunter/most-wanted', requireHunter, handleAsync(async (req, res) 
     const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId])).rows[0];
     if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
     await db.query('UPDATE runners SET is_most_wanted=TRUE, most_wanted_updated_at=NULL WHERE id=$1', [runnerId]);
+    await db.query('INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)', [runnerId, 'MOST WANTED lettél. A vadász élőben figyeli a sebességedet és a légvonalbeli távolságodat. A térképi helyzeted továbbra is csak az időzített hivatalos jelzéskor frissül.', 'urgent']);
     await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted.`);
   } else {
     await logEvent('MOST_WANTED_CLEARED', null, 'Most Wanted státusz törölve.');

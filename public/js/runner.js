@@ -11,6 +11,9 @@ let liveInFlight = false;
 let lastLiveSentAt = 0;
 let retryAfter = 0;
 let timersStarted = false;
+let audioContext = null;
+let titleFlashTimer = null;
+let runnerStateInitialized = false;
 let watchId = null;
 let lastAnnouncement = '';
 let lastAnnouncementPriority = '';
@@ -56,8 +59,7 @@ async function loadDashboard() {
     if (!timersStarted) {
       timersStarted = true;
       setInterval(updateTimer, 1000);
-      setInterval(pollRunnerUpdates, 1000);
-      setInterval(sendLiveMetrics, 1000);
+      runDynamicLiveLoop();
     }
     await pollRunnerUpdates();
     updateTimer();
@@ -78,7 +80,7 @@ function applySettings(nextSettings) {
   document.getElementById('r-game-status').innerText = statusLabel(settings.game_status);
   const priority = settings.announcement_priority || 'normal';
   document.getElementById('r-announcement-card').className = `announcement-card priority-${priority}`;
-  if (lastAnnouncement && settings.alerts_enabled && (lastAnnouncement !== settings.announcement || lastAnnouncementPriority !== priority)) showAlert(settings.announcement, priority);
+  if (lastAnnouncement !== '' && settings.alerts_enabled && (lastAnnouncement !== settings.announcement || lastAnnouncementPriority !== priority) && settings.announcement) showAlert(settings.announcement, priority, 'system');
   lastAnnouncement = settings.announcement || '';
   lastAnnouncementPriority = priority;
 }
@@ -87,7 +89,15 @@ function applyRunner(nextRunner) {
   if (!nextRunner) return;
   const wasMostWanted = runner?.is_most_wanted === true;
   runner = nextRunner;
-  if (!wasMostWanted && runner?.is_most_wanted === true) lastLiveSentAt = 0;
+  const isMostWanted = runner?.is_most_wanted === true;
+  document.body.classList.toggle('runner-most-wanted', isMostWanted);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isMostWanted ? '#120a06' : '#0b0d12');
+  if (runnerStateInitialized && !wasMostWanted && isMostWanted && settings.alerts_enabled !== false) {
+    lastLiveSentAt = 0;
+    showAlert('MOST WANTED státusz: a vadászok kiemelten keresnek.', 'urgent', 'most-wanted');
+  }
+  runnerStateInitialized = true;
+  if (!wasMostWanted && isMostWanted) lastLiveSentAt = 0;
   lastLocationTime = runner.last_location_at ? new Date(runner.last_location_at).getTime() : null;
   nextLocationAt = runner.next_location_at ? new Date(runner.next_location_at).getTime() : null;
   document.getElementById('r-name').innerText = runner.name || 'MENEKÜLŐ';
@@ -96,6 +106,14 @@ function applyRunner(nextRunner) {
   const activePenalty = runner.penalty_until && new Date(runner.penalty_until).getTime() > Date.now();
   document.getElementById('r-penalty').innerText = activePenalty ? `FOLYAMATOS LÁTHATÓSÁG · ${formatDateTime(runner.penalty_until)}-IG` : 'IDŐZÍTETT KÖVETÉS';
   document.getElementById('r-penalty').classList.toggle('active', activePenalty);
+}
+
+async function runDynamicLiveLoop() {
+  while (timersStarted && token) {
+    await Promise.allSettled([pollRunnerUpdates(), sendLiveMetrics()]);
+    const seconds = Math.max(1, Number(settings.live_update_interval) || 1);
+    await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+  }
 }
 
 async function pollRunnerUpdates() {
@@ -242,16 +260,65 @@ function locationFailed(message) {
   showAlert(message, 'urgent');
 }
 
-function showAlert(message, priority='important') {
-  const box = document.getElementById('alert-banner');
-  document.getElementById('alert-title').innerText = priority === 'urgent' ? 'AZONNALI FIGYELEM' : priority === 'important' ? 'FONTOS KÖZLEMÉNY' : 'JÁTÉKÜZENET';
-  document.getElementById('alert-body').innerText = message;
-  box.className = `alert-banner visible priority-${priority}`;
-  clearTimeout(showAlert.timer);
-  showAlert.timer = setTimeout(() => box.classList.remove('visible'), priority === 'urgent' ? 12000 : 7000);
-  if (priority !== 'normal' && navigator.vibrate) navigator.vibrate([120,80,120]);
+function ensureAudioContext() {
+  try {
+    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+    return audioContext;
+  } catch { return null; }
 }
-
+function playAlertTone(priority) {
+  const ctx = ensureAudioContext();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  const count = priority === 'urgent' ? 3 : priority === 'important' ? 2 : 1;
+  for (let i = 0; i < count; i++) {
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = priority === 'urgent' ? (i % 2 ? 880 : 660) : (i % 2 ? 740 : 520);
+    const t = now + i * 0.16;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(priority === 'urgent' ? 0.16 : 0.11, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t); osc.stop(t + 0.15);
+  }
+}
+function requestNotificationPermission() {
+  try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {}); } catch {}
+}
+function showSystemNotification(message, priority, title) {
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title || (priority === 'urgent' ? 'Most Wanted · Azonnali' : 'Most Wanted · Fontos'), { body: message, tag: 'most-wanted-alert', renotify: true });
+    }
+  } catch {}
+}
+function flashDocumentTitle() {
+  clearInterval(titleFlashTimer);
+  const base = document.title;
+  let on = false, ticks = 0;
+  titleFlashTimer = setInterval(() => {
+    document.title = (on = !on) ? '⚠ MOST WANTED ⚠' : base;
+    if (++ticks >= 12) { clearInterval(titleFlashTimer); document.title = base; }
+  }, 500);
+}
+function showAlert(message, priority='important', kind='message') {
+  const box = document.getElementById('alert-banner');
+  if (!box) return;
+  document.getElementById('alert-title').innerText = kind === 'most-wanted' ? 'MOST WANTED' : priority === 'urgent' ? 'AZONNALI FIGYELEM' : priority === 'important' ? 'FONTOS KÖZLEMÉNY' : 'JÁTÉKÜZENET';
+  document.getElementById('alert-body').innerText = message;
+  box.className = `alert-banner visible priority-${priority} ${kind}`;
+  clearTimeout(showAlert.timer);
+  showAlert.timer = setTimeout(() => box.classList.remove('visible'), priority === 'urgent' ? 14000 : priority === 'important' ? 9000 : 7000);
+  if (priority !== 'normal' || kind === 'most-wanted') {
+    if (navigator.vibrate) navigator.vibrate(priority === 'urgent' || kind === 'most-wanted' ? [180,90,180,90,260] : [120,80,120]);
+    playAlertTone(priority === 'normal' ? 'important' : priority);
+    flashDocumentTitle();
+    showSystemNotification(message, priority, kind === 'most-wanted' ? 'MOST WANTED' : null);
+  }
+}
+document.addEventListener('pointerdown', () => { ensureAudioContext(); requestNotificationPermission(); }, { once: true });
 function clearRunnerSession() {
   if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
   sessionStorage.removeItem('runnerToken'); localStorage.removeItem('runnerToken'); token = null; location.reload();

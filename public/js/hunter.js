@@ -10,6 +10,7 @@ let stateRequestInFlight = false;
 let settingsLoaded = false;
 const penaltySelections = {};
 let penaltyMenuOpen = false;
+let stateLoopStarted = false;
 
 async function safeJson(res) { try { return await res.json(); } catch { return {}; } }
 
@@ -19,7 +20,7 @@ async function loginHunter() {
   if (!res.ok) return showHunterToast('Hibás PIN kód.','urgent');
   document.getElementById('login-view').style.display='none';
   document.getElementById('hunter-layout').style.display='grid';
-  initMap(); startHunterGPS(); fetchState();
+  initMap(); startHunterGPS(); fetchState(); startStateLoop();
 }
 
 function initMap() {
@@ -59,7 +60,7 @@ async function fetchState(){
     updateStats(); renderRunners(); renderEventLog(data.events||[]);
   }finally{stateRequestInFlight=false;}
 }
-setInterval(fetchState,1000);
+async function startStateLoop(){ if(stateLoopStarted)return; stateLoopStarted=true; while(stateLoopStarted){ const seconds=Math.max(1,Number(settings.live_update_interval)||1); await new Promise(r=>setTimeout(r,seconds*1000)); await fetchState(); } }
 
 function fillSettings(s){
   document.getElementById('set-interval').value=s.location_interval||20;
