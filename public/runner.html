@@ -8,13 +8,7 @@
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body class="runner-page">
-    <div id="alert-banner" class="alert-banner" role="alert">
-        <div class="alert-mark">!</div>
-        <div>
-            <strong id="alert-title">FONTOS KÖZLEMÉNY</strong>
-            <p id="alert-body"></p>
-        </div>
-    </div>
+    <div id="alert-stack" class="alert-stack" aria-live="assertive" aria-atomic="false"></div>
 
     <main class="app-shell narrow-shell" id="login-view">
         <section class="auth-card">

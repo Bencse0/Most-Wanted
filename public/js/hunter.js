@@ -139,7 +139,23 @@ async function updateSettings(){const res=await fetch('/api/settings',{method:'P
 async function sendGlobalMsg(){const input=document.getElementById('global-msg'),message=input.value.trim();if(!message)return;const res=await fetch('/api/hunter/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,priority:document.getElementById('message-priority').value})});if(res.ok){input.value='';showHunterToast('Üzenet elküldve minden menekülőnek.','normal');await fetchState();}}
 async function resetGame(){if(!confirm('Biztosan teljesen újraindítod a játékot?'))return;if(!confirm('Ez a művelet nem vonható vissza. Folytatod?'))return;const res=await fetch('/api/hunter/reset',{method:'POST'});if(res.ok){settingsLoaded=false;await fetchState();showHunterToast('A játék teljesen újraindult.','normal');}}
 function renderEventLog(events){document.getElementById('event-log').innerHTML=events.map(e=>`<div><time>${formatDateTime(e.created_at)}</time> ${escapeHtml(e.data)}</div>`).join('');}
-function showHunterToast(message,priority){const toast=document.getElementById('hunter-toast');toast.innerText=message;toast.className=`hunter-toast visible priority-${priority}`;clearTimeout(showHunterToast.timer);showHunterToast.timer=setTimeout(()=>toast.classList.remove('visible'),5000);}
+function showHunterToast(message,priority='normal'){
+  const stack=document.getElementById('hunter-toast-stack');
+  if(!stack||!message)return;
+  const toast=document.createElement('div');
+  toast.className=`hunter-toast priority-${priority}`;
+  toast.innerHTML=`<strong>${priority==='urgent'?'AZONNALI':priority==='important'?'FONTOS':'CONTROL ROOM'}</strong><span></span><button type="button" aria-label="Bezárás">×</button>`;
+  toast.querySelector('span').textContent=message;
+  toast.querySelector('button').addEventListener('click',()=>removeHunterToast(toast));
+  stack.appendChild(toast);
+  requestAnimationFrame(()=>toast.classList.add('visible'));
+  toast._timer=setTimeout(()=>removeHunterToast(toast),priority==='urgent'?9000:6500);
+}
+function removeHunterToast(toast){
+  if(!toast||toast.dataset.removing==='1')return;
+  toast.dataset.removing='1'; clearTimeout(toast._timer); toast.classList.remove('visible'); toast.classList.add('removing');
+  setTimeout(()=>toast.remove(),250);
+}
 function getDistanceInKm(lat1,lon1,lat2,lon2){const R=6371,toRad=v=>Number(v)*Math.PI/180,dLat=toRad(lat2-lat1),dLon=toRad(lon2-lon1),a=Math.sin(dLat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;return R*(2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)));}
 function toKmh(v){return Number(v)*3.6;}
 function formatDateTime(v){if(!v)return'--:--';const d=new Date(v);return Number.isNaN(d.getTime())?'--:--':d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}

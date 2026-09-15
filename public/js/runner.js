@@ -267,22 +267,32 @@ function ensureAudioContext() {
     return audioContext;
   } catch { return null; }
 }
-function playAlertTone(priority) {
+function ensureAudioContext() {
+  if (audioContext) return audioContext;
+  try { audioContext = new (window.AudioContext || window.webkitAudioContext)(); } catch { return null; }
+  return audioContext;
+}
+function playAlertTone(priority='important', kind='message') {
   const ctx = ensureAudioContext();
   if (!ctx) return;
-  const now = ctx.currentTime;
-  const count = priority === 'urgent' ? 3 : priority === 'important' ? 2 : 1;
-  for (let i = 0; i < count; i++) {
-    const osc = ctx.createOscillator(), gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = priority === 'urgent' ? (i % 2 ? 880 : 660) : (i % 2 ? 740 : 520);
-    const t = now + i * 0.16;
+  if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
+  const now = ctx.currentTime + 0.02;
+  const urgent = priority === 'urgent' || kind === 'most-wanted';
+  const tones = urgent ? [660, 880, 1046.5, 880] : [523.25, 659.25, 783.99];
+  tones.forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const t = now + i * (urgent ? 0.12 : 0.15);
+    osc.type = i === 0 ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(freq, t);
+    osc.frequency.exponentialRampToValueAtTime(freq * (urgent ? 0.92 : 0.98), t + 0.1);
     gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(priority === 'urgent' ? 0.16 : 0.11, t + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    gain.gain.exponentialRampToValueAtTime(urgent ? 0.13 : 0.09, t + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + (urgent ? 0.1 : 0.13));
     osc.connect(gain).connect(ctx.destination);
-    osc.start(t); osc.stop(t + 0.15);
-  }
+    osc.start(t);
+    osc.stop(t + (urgent ? 0.12 : 0.15));
+  });
 }
 function requestNotificationPermission() {
   try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {}); } catch {}
@@ -290,33 +300,58 @@ function requestNotificationPermission() {
 function showSystemNotification(message, priority, title) {
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(title || (priority === 'urgent' ? 'Most Wanted · Azonnali' : 'Most Wanted · Fontos'), { body: message, tag: 'most-wanted-alert', renotify: true });
+      const tag = `mw-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      new Notification(title || (priority === 'urgent' ? 'Most Wanted · Azonnali' : 'Most Wanted · Fontos'), {
+        body: message, tag, renotify: true, requireInteraction: priority === 'urgent'
+      });
     }
   } catch {}
 }
-function flashDocumentTitle() {
+function flashDocumentTitle(duration=7000) {
   clearInterval(titleFlashTimer);
   const base = document.title;
   let on = false, ticks = 0;
   titleFlashTimer = setInterval(() => {
-    document.title = (on = !on) ? '⚠ MOST WANTED ⚠' : base;
-    if (++ticks >= 12) { clearInterval(titleFlashTimer); document.title = base; }
+    document.title = (on = !on) ? '⚠ MOST WANTED · FIGYELEM ⚠' : base;
+    if (++ticks >= Math.ceil(duration / 500)) { clearInterval(titleFlashTimer); document.title = base; }
   }, 500);
 }
+function vibrateFor(priority, kind) {
+  if (!navigator.vibrate) return;
+  const pattern = kind === 'most-wanted' || priority === 'urgent' ? [180,80,180,80,320] : [110,70,110];
+  try { navigator.vibrate(pattern); } catch {}
+}
 function showAlert(message, priority='important', kind='message') {
-  const box = document.getElementById('alert-banner');
-  if (!box) return;
-  document.getElementById('alert-title').innerText = kind === 'most-wanted' ? 'MOST WANTED' : priority === 'urgent' ? 'AZONNALI FIGYELEM' : priority === 'important' ? 'FONTOS KÖZLEMÉNY' : 'JÁTÉKÜZENET';
-  document.getElementById('alert-body').innerText = message;
-  box.className = `alert-banner visible priority-${priority} ${kind}`;
-  clearTimeout(showAlert.timer);
-  showAlert.timer = setTimeout(() => box.classList.remove('visible'), priority === 'urgent' ? 14000 : priority === 'important' ? 9000 : 7000);
+  const stack = document.getElementById('alert-stack');
+  if (!stack || !message) return;
+  const id = `alert-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const article = document.createElement('article');
+  article.className = `alert-card priority-${priority} ${kind}`;
+  article.dataset.alertId = id;
+  const title = kind === 'most-wanted' ? 'MOST WANTED' : priority === 'urgent' ? 'AZONNALI FIGYELEM' : priority === 'important' ? 'FONTOS KÖZLEMÉNY' : 'JÁTÉKÜZENET';
+  const icon = kind === 'most-wanted' ? 'MW' : priority === 'urgent' ? '!' : '•';
+  article.innerHTML = `<div class="alert-card-glow"></div><div class="alert-mark">${icon}</div><div class="alert-copy"><div class="alert-kicker">${title}</div><p></p></div><button class="alert-close" type="button" aria-label="Üzenet bezárása">×</button>`;
+  article.querySelector('.alert-copy p').textContent = message;
+  article.querySelector('.alert-close').addEventListener('click', () => removeAlert(article));
+  stack.appendChild(article);
+  requestAnimationFrame(() => article.classList.add('visible'));
+  const duration = kind === 'most-wanted' ? 18000 : priority === 'urgent' ? 16000 : priority === 'important' ? 12000 : 9000;
+  const timer = setTimeout(() => removeAlert(article), duration);
+  article._dismissTimer = timer;
   if (priority !== 'normal' || kind === 'most-wanted') {
-    if (navigator.vibrate) navigator.vibrate(priority === 'urgent' || kind === 'most-wanted' ? [180,90,180,90,260] : [120,80,120]);
-    playAlertTone(priority === 'normal' ? 'important' : priority);
-    flashDocumentTitle();
+    vibrateFor(priority, kind);
+    playAlertTone(priority, kind);
+    flashDocumentTitle(kind === 'most-wanted' ? 12000 : 7000);
     showSystemNotification(message, priority, kind === 'most-wanted' ? 'MOST WANTED' : null);
   }
+}
+function removeAlert(article) {
+  if (!article || article.dataset.removing === '1') return;
+  article.dataset.removing = '1';
+  clearTimeout(article._dismissTimer);
+  article.classList.remove('visible');
+  article.classList.add('removing');
+  setTimeout(() => article.remove(), 300);
 }
 document.addEventListener('pointerdown', () => { ensureAudioContext(); requestNotificationPermission(); }, { once: true });
 function clearRunnerSession() {

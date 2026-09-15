@@ -37,3 +37,13 @@ A `game.db` nem szükséges a production működéshez.
 - A runner kliens a beállított `live_update_interval` szerint küld egy pillanatnyi GPS-mintát a szerver mérési endpointjára.
 - A szerver ezt csak arra használja, hogy kiszámolja a légvonalbeli távolságot a vadász aktuális GPS-éhez.
 - A hunter kizárólag a `most_wanted_distance_km`, `most_wanted_speed`, `most_wanted_updated_at` mezőket kapja vissza; a Most Wanted térképi ikonja továbbra is a legutóbbi hivatalos intervallumos helyzetet mutatja.
+
+
+## Premium notification / UI pass
+- A runner értesítések most valódi stackben jelennek meg; minden üzenet külön kártya, saját időzítő és saját bezárás gombot kap. Egy új üzenet nem zárja be a régit.
+- Az értesítési hang gazdagabb WebAudio mintát használ; urgent és Most Wanted állapotnál erősebb hangmintával. A böngésző első felhasználói interakciója aktiválja az audio contextet.
+- Fontos/azonnali/Most Wanted jelzésnél rezgés, dokumentum-title flash és rendszerértesítés is megmaradt; a rendszerértesítések egyedi taggel készülnek, így nem írják egymást felül.
+- A runner üzenet UI méretezve és mobilon is responsívan megjelenítve.
+- A Most Wanted téma megerősített narancs/piros/fekete vizuális rendszert kapott, glow, badge, scanline és státusz-kiemelésekkel.
+- A hunter oldali toastok is stackelődnek.
+- A PWA Service Worker cache verziója v11-re frissült.
