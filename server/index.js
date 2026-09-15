@@ -382,43 +382,81 @@ app.post('/api/hunter/reset', requireHunter, handleAsync(async (req, res) => {
 }));
 
 app.post('/api/hunter/most-wanted', requireHunter, handleAsync(async (req, res) => {
-  await ensureMostWantedCompatibility();
-  await expireMostWantedIfNeeded();
-  const runnerId = req.body.runner_id ? Number(req.body.runner_id) : null;
-  const current = (await db.query('SELECT * FROM settings WHERE id=1')).rows[0];
-  const now = Date.now();
-  if (!runnerId) {
-    const currentTarget = current?.most_wanted_active_runner_id ? Number(current.most_wanted_active_runner_id) : null;
-    const mode = current?.most_wanted_mode === '2m' ? '2m' : '1m';
-    const cooldownSeconds = mode === '2m' ? 150 : 90;
-    if (currentTarget) {
-      await db.query('UPDATE runners SET is_most_wanted=FALSE, most_wanted_distance_km=NULL, most_wanted_speed=NULL, most_wanted_updated_at=NULL, most_wanted_until=NULL WHERE id=$1', [currentTarget]);
-      await logEvent('MOST_WANTED_CLEARED', currentTarget, 'Most Wanted státusz kézzel törölve.');
+  // Do not let a legacy production schema turn the action into an opaque 500.
+  // The startup migration normally creates these fields, but this endpoint is
+  // deliberately defensive so an older deployment can recover safely.
+  try {
+    await ensureMostWantedCompatibility();
+  } catch (migrationError) {
+    console.error('MOST_WANTED_SCHEMA_ERROR', migrationError?.stack || migrationError);
+    return res.status(500).json({ error: 'A Most Wanted adatbázis-frissítése nem sikerült.', code: 'MW_SCHEMA_ERROR' });
+  }
+
+  try {
+    await expireMostWantedIfNeeded();
+    const runnerId = req.body.runner_id != null && String(req.body.runner_id).trim() !== '' ? Number(req.body.runner_id) : null;
+    const settingsResult = await db.query('SELECT * FROM settings WHERE id=1');
+    const current = settingsResult.rows[0];
+    if (!current) return res.status(500).json({ error: 'A játékbeállítások sora nem található.', code: 'MW_SETTINGS_MISSING' });
+
+    const now = Date.now();
+    if (!runnerId) {
+      const currentTarget = current.most_wanted_active_runner_id ? Number(current.most_wanted_active_runner_id) : null;
+      const mode = current.most_wanted_mode === '2m' ? '2m' : '1m';
+      const cooldownSeconds = mode === '2m' ? 150 : 90;
+      if (currentTarget) {
+        await db.query(
+          'UPDATE runners SET is_most_wanted=FALSE, most_wanted_distance_km=NULL, most_wanted_speed=NULL, most_wanted_updated_at=NULL, most_wanted_until=NULL WHERE id=$1',
+          [currentTarget]
+        );
+        await logEvent('MOST_WANTED_CLEARED', currentTarget, 'Most Wanted státusz kézzel törölve.');
+      }
+      const cooldownUntil = new Date(now + cooldownSeconds * 1000);
+      await db.query(
+        'UPDATE settings SET most_wanted_active_runner_id=NULL, most_wanted_active_until=NULL, most_wanted_cooldown_until=$1, updated_at=NOW() WHERE id=1',
+        [cooldownUntil]
+      );
+      return res.json({ success: true, cooldown_until: cooldownUntil.toISOString() });
     }
-    const cooldownUntil = new Date(now + cooldownSeconds * 1000);
-    await db.query('UPDATE settings SET most_wanted_active_runner_id=NULL, most_wanted_active_until=NULL, most_wanted_cooldown_until=$1 WHERE id=1', [cooldownUntil]);
-    return res.json({ success: true, cooldown_until: cooldownUntil.toISOString() });
+
+    if (!Number.isInteger(runnerId) || runnerId < 1) return res.status(400).json({ error: 'Érvénytelen játékos.' });
+    const runnerResult = await db.query('SELECT id, name FROM runners WHERE id=$1', [runnerId]);
+    const runner = runnerResult.rows[0];
+    if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
+
+    const activeUntilMs = current.most_wanted_active_until ? new Date(current.most_wanted_active_until).getTime() : 0;
+    const cooldownUntilMs = current.most_wanted_cooldown_until ? new Date(current.most_wanted_cooldown_until).getTime() : 0;
+    if (activeUntilMs > now || cooldownUntilMs > now) {
+      const hasActive = activeUntilMs > now;
+      const until = hasActive ? current.most_wanted_active_until : current.most_wanted_cooldown_until;
+      return res.status(409).json({ error: hasActive ? 'Már van aktív Most Wanted célpont.' : 'A Most Wanted újraindítása még cooldownban van.', until });
+    }
+
+    const mode = req.body.mode === '2m' ? '2m' : '1m';
+    const activeSeconds = mode === '2m' ? 120 : 60;
+    const cooldownSeconds = mode === '2m' ? 150 : 90;
+    const activeUntil = new Date(now + activeSeconds * 1000);
+    const cooldownUntil = new Date(now + (activeSeconds + cooldownSeconds) * 1000);
+
+    await db.query('UPDATE runners SET is_most_wanted=FALSE, most_wanted_distance_km=NULL, most_wanted_speed=NULL, most_wanted_updated_at=NULL, most_wanted_until=NULL');
+    await db.query(
+      'UPDATE runners SET is_most_wanted=TRUE, most_wanted_until=$1, most_wanted_updated_at=NULL WHERE id=$2',
+      [activeUntil, runnerId]
+    );
+    await db.query(
+      'UPDATE settings SET most_wanted_mode=$1, most_wanted_active_runner_id=$2, most_wanted_active_until=$3, most_wanted_cooldown_until=$4, updated_at=NOW() WHERE id=1',
+      [mode, runnerId, activeUntil, cooldownUntil]
+    );
+    await db.query(
+      'INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)',
+      [runnerId, `MOST WANTED lettél. ${activeSeconds / 60} percig kiemelt célpont vagy. A vadász élőben figyeli a sebességedet és a légvonalbeli távolságodat. A térképi helyzeted továbbra is csak az időzített hivatalos jelzéskor frissül.`, 'urgent']
+    );
+    await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted (${activeSeconds / 60} perc, ${cooldownSeconds} mp cooldown).`);
+    return res.json({ success: true, mode, active_until: activeUntil.toISOString(), cooldown_until: cooldownUntil.toISOString() });
+  } catch (error) {
+    console.error('MOST_WANTED_ROUTE_ERROR', error?.stack || error);
+    return res.status(500).json({ error: 'A Most Wanted beállítása szerverhibába futott.', code: 'MW_ROUTE_ERROR' });
   }
-  if (!Number.isInteger(runnerId) || runnerId < 1) return res.status(400).json({ error: 'Érvénytelen játékos.' });
-  const runner = (await db.query('SELECT id, name FROM runners WHERE id=$1')).rows[0];
-  if (!runner) return res.status(404).json({ error: 'A játékos nem található' });
-  const hasActive = current?.most_wanted_active_until && new Date(current.most_wanted_active_until).getTime() > now;
-  const hasCooldown = current?.most_wanted_cooldown_until && new Date(current.most_wanted_cooldown_until).getTime() > now;
-  if (hasActive || hasCooldown) {
-    const until = hasActive ? current.most_wanted_active_until : current.most_wanted_cooldown_until;
-    return res.status(409).json({ error: hasActive ? 'Már van aktív Most Wanted célpont.' : 'A Most Wanted újraindítása még cooldownban van.', until });
-  }
-  const mode = req.body.mode === '2m' ? '2m' : '1m';
-  const activeSeconds = mode === '2m' ? 120 : 60;
-  const cooldownSeconds = mode === '2m' ? 150 : 90;
-  const activeUntil = new Date(now + activeSeconds * 1000);
-  const cooldownUntil = new Date(now + (activeSeconds + cooldownSeconds) * 1000);
-  await db.query('UPDATE runners SET is_most_wanted=FALSE, most_wanted_distance_km=NULL, most_wanted_speed=NULL, most_wanted_updated_at=NULL, most_wanted_until=NULL');
-  await db.query('UPDATE runners SET is_most_wanted=TRUE, most_wanted_until=$1, most_wanted_updated_at=NULL WHERE id=$2', [activeUntil, runnerId]);
-  await db.query('UPDATE settings SET most_wanted_mode=$1, most_wanted_active_runner_id=$2, most_wanted_active_until=$3, most_wanted_cooldown_until=$4 WHERE id=1', [mode, runnerId, activeUntil, cooldownUntil]);
-  await db.query('INSERT INTO messages (runner_id, message, priority) VALUES ($1,$2,$3)', [runnerId, `MOST WANTED lettél. ${activeSeconds / 60} percig kiemelt célpont vagy. A vadász élőben figyeli a sebességedet és a légvonalbeli távolságodat. A térképi helyzeted továbbra is csak az időzített hivatalos jelzéskor frissül.`, 'urgent']);
-  await logEvent('MOST_WANTED_SET', runnerId, `${runner.name} lett a Most Wanted (${activeSeconds / 60} perc, ${cooldownSeconds} mp cooldown).`);
-  res.json({ success: true, mode, active_until: activeUntil.toISOString(), cooldown_until: cooldownUntil.toISOString() });
 }));
 
 app.post('/api/hunter/penalty', requireHunter, handleAsync(async (req, res) => {

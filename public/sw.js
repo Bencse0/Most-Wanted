@@ -1,4 +1,4 @@
-const CACHE_NAME = 'most-wanted-v13-cooldown';
+const CACHE_NAME = 'most-wanted-v14-fix';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
